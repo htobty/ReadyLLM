@@ -62,6 +62,8 @@ function AutoTune({ targetId }) {
   const [results, setResults] = useState([])
   const [best, setBest] = useState(null)
   const [baseline, setBaseline] = useState(null)
+  const [saved, setSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const pollRef = useRef(null)
 
@@ -131,6 +133,31 @@ function AutoTune({ targetId }) {
     resumePoll(d.job_id)
   }
 
+  async function saveBest() {
+    if (!best?.config) return
+    setSaving(true)
+    try {
+      const res = await fetch('/api/tune/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_id: targetId,
+          model: selected,
+          ctx_size: ctxSize,
+          params: best.config,
+          score: best.score || 0,
+        }),
+      })
+      const d = await res.json()
+      if (d.ok) setSaved(true)
+      else setError(d.message || '保存失败')
+    } catch (e) {
+      setError('保存请求失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   let gain = null
   if (best && baseline && baseline.metrics?.decode > 0 && best.metrics?.decode > 0) {
     gain = ((best.metrics.decode - baseline.metrics.decode) / baseline.metrics.decode * 100).toFixed(1)
@@ -197,6 +224,11 @@ function AutoTune({ targetId }) {
               相比你的当前配置（{baseline.metrics?.decode} t/s），解码速度{Number(gain) >= 0 ? '提升' : '下降'} {Math.abs(Number(gain))}%
             </div>
           )}
+          <button onClick={saveBest} disabled={saving || saved}
+            className={`mt-4 w-full py-2 rounded-lg text-sm font-semibold transition ${saved ? 'bg-green/20 text-green cursor-default' : 'bg-green text-bg hover:opacity-90'}`}>
+            {saved ? '✓ 已保存并应用到该模型部署参数' : (saving ? '保存中...' : '保存并应用')}
+          </button>
+          {saved && <div className="mt-2 text-xs text-gray">含固定上下文长度 ctx={ctxSize}，下次部署该模型自动回填</div>}
         </div>
       )}
 
@@ -254,8 +286,35 @@ function AITune({ targetId }) {
   const [logs, setLogs] = useState([])
   const [rounds, setRounds] = useState([])
   const [best, setBest] = useState(null)
+  const [saved, setSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const pollRef = useRef(null)
+
+  async function saveBest() {
+    if (!best?.params) return
+    setSaving(true)
+    try {
+      const res = await fetch('/api/ai-tune/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_id: targetId,
+          model: selected,
+          ctx_size: ctxSize,
+          params: best.params,
+          score: 0,
+        }),
+      })
+      const d = await res.json()
+      if (d.ok) setSaved(true)
+      else setError(d.message || '保存失败')
+    } catch (e) {
+      setError('保存请求失败')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   function resumePoll(jobId) {
     clearInterval(pollRef.current)
@@ -480,6 +539,11 @@ function AITune({ targetId }) {
             ))}
           </div>
           <div className="text-xs text-gray">{best.reasoning}</div>
+          <button onClick={saveBest} disabled={saving || saved}
+            className={`mt-4 w-full py-2 rounded-lg text-sm font-semibold transition ${saved ? 'bg-green/20 text-green cursor-default' : 'bg-green text-bg hover:opacity-90'}`}>
+            {saved ? '✓ 已保存并应用到该模型部署参数' : (saving ? '保存中...' : '保存并应用')}
+          </button>
+          {saved && <div className="mt-2 text-xs text-gray">含固定上下文长度 ctx={ctxSize}，下次部署该模型自动回填</div>}
         </div>
       )}
     </div>

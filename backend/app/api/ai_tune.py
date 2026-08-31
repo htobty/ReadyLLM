@@ -5,9 +5,9 @@
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict
 
-from ..services import ai_tuner
+from ..services import ai_tuner, tune_history
 
 router = APIRouter()
 
@@ -79,3 +79,25 @@ def status(job_id: str):
 def active(target_id: str):
     """返回该目标机正在运行的 AI 调优任务，供前端刷新后恢复轮询"""
     return {"jobs": ai_tuner.list_active_jobs(target_id)}
+
+
+
+class SaveTuneRequest(BaseModel):
+    target_id: str
+    model: str
+    ctx_size: int                        # 固定上下文长度，随参数一并保存
+    params: Dict[str, str]               # 最优参数（扁平字典，不含 ctx-size）
+    score: float = 0.0
+
+
+@router.post("/save")
+def save(req: SaveTuneRequest):
+    """把 AI 调优的最终推荐参数（含固定 ctx_size）保存到该模型，
+    作为部署页 default-args 的回填来源。用户在结果界面点「保存并应用」时调用。"""
+    if not req.params:
+        return {"ok": False, "message": "无参数可保存"}
+    tune_history.save_latest(
+        req.target_id, req.model, req.ctx_size, req.params,
+        source="ai_tuner", score=req.score,
+    )
+    return {"ok": True, "message": f"已保存到 {req.model} 的部署参数（含 ctx={req.ctx_size}）"}

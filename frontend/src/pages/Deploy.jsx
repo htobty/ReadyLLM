@@ -68,6 +68,21 @@ function TextDeploy({ targetId }) {
       .finally(() => setLoadingArgs(false))
   }, [targetId, selected])
 
+  // Poll status until `running` flips to the expected value (or timeout).
+  // Backend /start only sends the launch command without waiting for the engine
+  // to be ready, so a single status query often returns false before the process
+  // is detected, leaving the buttons in a stale state.
+  async function pollStatus(expectRunning, timeoutMs = 90000, intervalMs = 1500) {
+    const t0 = Date.now()
+    while (true) {
+      const s = await fetch(`/api/deploy/status?target_id=${targetId}`).then(r => r.json())
+      setStatus(s)
+      if (!!s.running === expectRunning) return
+      if (Date.now() - t0 > timeoutMs) return
+      await new Promise(r => setTimeout(r, intervalMs))
+    }
+  }
+
   async function start() {
     setMsg('启动中...')
     const res = await fetch('/api/deploy/start', {
@@ -77,8 +92,7 @@ function TextDeploy({ targetId }) {
     })
     const d = await res.json()
     setMsg(d.message)
-    const s = await fetch(`/api/deploy/status?target_id=${targetId}`).then(r => r.json())
-    setStatus(s)
+    if (d.success) await pollStatus(true)
   }
 
   async function stop() {
@@ -86,8 +100,7 @@ function TextDeploy({ targetId }) {
     const res = await fetch(`/api/deploy/stop?target_id=${targetId}`, { method: 'POST' })
     const d = await res.json()
     setMsg(d.message)
-    const s = await fetch(`/api/deploy/status?target_id=${targetId}`).then(r => r.json())
-    setStatus(s)
+    if (d.success) await pollStatus(false)
   }
 
   function resetArgs() {
@@ -248,6 +261,18 @@ function VideoDeploy({ targetId, target }) {
     return () => clearInterval(pollRef.current)
   }, [job?.prompt_id])
 
+  // Poll status until `running` flips to the expected value (or timeout).
+  async function pollStatus(expectRunning, timeoutMs = 90000, intervalMs = 1500) {
+    const t0 = Date.now()
+    while (true) {
+      const s = await fetch(`/api/deploy/status?target_id=${targetId}`).then(r => r.json())
+      setStatus(s)
+      if (!!s.running === expectRunning) return
+      if (Date.now() - t0 > timeoutMs) return
+      await new Promise(r => setTimeout(r, intervalMs))
+    }
+  }
+
   async function startEngine() {
     setMsg('启动 ComfyUI 中...')
     const res = await fetch('/api/deploy/start', {
@@ -257,8 +282,7 @@ function VideoDeploy({ targetId, target }) {
     })
     const d = await res.json()
     setMsg(d.message)
-    const s = await fetch(`/api/deploy/status?target_id=${targetId}`).then(r => r.json())
-    setStatus(s)
+    if (d.success) await pollStatus(true)
   }
 
   async function stopEngine() {
@@ -266,8 +290,7 @@ function VideoDeploy({ targetId, target }) {
     const res = await fetch(`/api/deploy/stop?target_id=${targetId}`, { method: 'POST' })
     const d = await res.json()
     setMsg(d.message)
-    const s = await fetch(`/api/deploy/status?target_id=${targetId}`).then(r => r.json())
-    setStatus(s)
+    if (d.success) await pollStatus(false)
   }
 
   async function generate() {

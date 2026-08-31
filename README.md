@@ -25,11 +25,15 @@ Deploy, monitor, and tune large language models through a visual interface — p
 
 ## Preview
 
-![Real-time monitor](docs/screenshots/monitor.jpg)
+![Real-time monitor](docs/screenshots/monitor.png)
 
 > Real-time monitoring: GPU / VRAM / throughput / latency metric curves
 
-![Target machine settings](docs/screenshots/settings.jpg)
+![Smart tuning](docs/screenshots/tune.png)
+
+> Smart tuning: two-phase parameter search and benchmark results
+
+![Target machine settings](docs/screenshots/setting.png)
 
 > Target machine settings: local or remote over SSH, engine and model directory configuration
 

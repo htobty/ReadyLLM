@@ -25,11 +25,15 @@
 
 ## 界面预览
 
-![实时监控](docs/screenshots/monitor.jpg)
+![实时监控](docs/screenshots/monitor.png)
 
 > 实时监控：GPU / 显存 / 吞吐 / 延迟等指标曲线
 
-![目标机器设置](docs/screenshots/settings.jpg)
+![智能调优](docs/screenshots/tune.png)
+
+> 智能调优：两阶段参数搜索与测速结果
+
+![目标机器设置](docs/screenshots/setting.png)
 
 > 目标机器设置：本机或 SSH 远程，引擎与模型目录配置
 

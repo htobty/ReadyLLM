@@ -7,7 +7,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, Dict
 
-from ..services import tuner
+from ..services import tuner, tune_history
 
 router = APIRouter()
 
@@ -54,3 +54,25 @@ def options():
         "cache_options": tuner.CACHE_OPTIONS,
         "ngl_options": tuner.NGL_OPTIONS,
     }
+
+
+
+class SaveTuneRequest(BaseModel):
+    target_id: str
+    model: str
+    ctx_size: int                        # 固定上下文长度，随参数一并保存
+    params: Dict[str, str]               # 最优参数（扁平字典，不含 ctx-size）
+    score: float = 0.0
+
+
+@router.post("/save")
+def save(req: SaveTuneRequest):
+    """把某次调优的最优参数（含固定 ctx_size）保存到该模型，
+    作为部署页 default-args 的回填来源。用户在结果界面点「保存并应用」时调用。"""
+    if not req.params:
+        return {"ok": False, "message": "无参数可保存"}
+    tune_history.save_latest(
+        req.target_id, req.model, req.ctx_size, req.params,
+        source="tuner", score=req.score,
+    )
+    return {"ok": True, "message": f"已保存到 {req.model} 的部署参数（含 ctx={req.ctx_size}）"}
