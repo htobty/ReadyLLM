@@ -1,0 +1,46 @@
+# ===== Python (backend) =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/.venv/
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ===== Node (frontend) =====
+node_modules/
+frontend/dist/
+dist/
+dist-ssr/
+*.local
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ===== 本地配置 / 密钥（绝不入库）=====
+.env
+.env.*
+*.pem
+id_rsa*
+*.key
+# 用户机器配置（含 SSH 主机/密码等敏感信息，存于 ~ 目录，正常不会进仓库，这里再兜底）
+targets.json
+
+# ===== 日志 =====
+*.log
+logs/
+.makwo/
+
+# ===== 操作系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

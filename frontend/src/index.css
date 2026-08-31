@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', Roboto, sans-serif;
+  color: #cdd6f4;
+  background-color: #14141f;
+  background-image:
+    radial-gradient(1200px 800px at 12% -10%, rgba(137, 180, 250, 0.10), transparent 60%),
+    radial-gradient(1000px 700px at 100% 0%, rgba(203, 166, 247, 0.09), transparent 55%),
+    radial-gradient(900px 900px at 85% 110%, rgba(148, 226, 213, 0.07), transparent 55%),
+    linear-gradient(180deg, #16161f 0%, #12121b 100%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 细滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(108, 112, 134, 0.45) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(108, 112, 134, 0.4);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(140, 145, 168, 0.65);
+  background-clip: padding-box;
+}
+
+::selection {
+  background: rgba(137, 180, 250, 0.28);
+  color: #ffffff;
+}
+
+/* 等宽字体用于数值/命令行 */
+.font-mono {
+  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, 'Cascadia Code', Menlo,
+    Consolas, monospace;
+  font-feature-settings: 'tnum' 1;
+  letter-spacing: -0.01em;
+}
+
+/* 卡片玻璃质感 */
+@layer components {
+  .glass {
+    background: linear-gradient(180deg, rgba(42, 42, 60, 0.72), rgba(34, 34, 50, 0.66));
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(205, 214, 244, 0.06);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset,
+      0 12px 32px -16px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* 进场动画 */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.animate-fade-in {
+  animation: fadeIn 0.4s ease both;
+}
+.animate-slide-up {
+  animation: slideUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
