@@ -1,6 +1,6 @@
 import { useWebSocket } from '../hooks/useWebSocket'
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Area, AreaChart } from 'recharts'
-import { useRef } from 'react'
+import { useState, useEffect } from 'react'
 
 const MAX_POINTS = 60
 
@@ -47,43 +47,31 @@ export default function Monitor({ targetId }) {
   const { data, connected } = useWebSocket(
     targetId ? `ws://localhost:8000/api/monitor/ws?target_id=${targetId}` : ''
   )
-  const historyRef = useRef({ speed: [], cache: [], spec: [] })
-  const lastRef = useRef({ completion_tokens: 0, prompt_tokens: 0 })
+  const [history, setHistory] = useState({ speed: [], cache: [], spec: [] })
 
   // 切换目标机器时清空历史
-  const curTargetRef = useRef(targetId)
-  if (curTargetRef.current !== targetId) {
-    curTargetRef.current = targetId
-    historyRef.current = { speed: [], cache: [], spec: [] }
-    lastRef.current = { completion_tokens: 0, prompt_tokens: 0 }
-  }
+  useEffect(() => {
+    setHistory({ speed: [], cache: [], spec: [] })
+  }, [targetId])
 
-  // 只在累计值变化时追加描点
-  if (data?.metrics) {
+  // 每 10s 采集一次；值有变化才追加描点，没变化不描
+  useEffect(() => {
+    if (!data?.metrics) return
     const m = data.metrics
-    const h = historyRef.current
-    const l = lastRef.current
+    setHistory((prev) => {
+      const withPoint = (arr, value) => {
+        if (arr.length > 0 && arr[arr.length - 1].value === value) return arr
+        return [...arr, { idx: arr.length, value }].slice(-MAX_POINTS)
+      }
+      const speed = withPoint(prev.speed, m.completion_speed)
+      const cache = withPoint(prev.cache, m.cache_hit_rate)
+      const spec = withPoint(prev.spec, m.spec_accept_rate)
+      if (speed === prev.speed && cache === prev.cache && spec === prev.spec) return prev
+      return { speed, cache, spec }
+    })
+  }, [data])
 
-    if (m.completion_tokens !== l.completion_tokens && m.completion_speed > 0) {
-      h.speed.push({ idx: h.speed.length, value: m.completion_speed })
-      if (h.speed.length > MAX_POINTS) h.speed.shift()
-    }
-    if (m.prompt_tokens !== l.prompt_tokens && m.cache_hit_rate > 0) {
-      h.cache.push({ idx: h.cache.length, value: m.cache_hit_rate })
-      if (h.cache.length > MAX_POINTS) h.cache.shift()
-    }
-    if (m.spec_accept_rate > 0) {
-      h.spec.push({ idx: h.spec.length, value: m.spec_accept_rate })
-      if (h.spec.length > MAX_POINTS) h.spec.shift()
-    }
-
-    lastRef.current = {
-      completion_tokens: m.completion_tokens,
-      prompt_tokens: m.prompt_tokens,
-    }
-  }
-
-  const h = historyRef.current
+  const h = history
   const gpu = data?.gpu || {}
   const cpuMem = data?.cpu_mem || {}
   const metrics = data?.metrics || {}
