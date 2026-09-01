@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { IconAlert, IconCheck, IconX } from '../components/Icons'
+import { useI18n } from '../i18n/I18nContext'
 
 const EMPTY = {
   conn_type: 'local',
   os: 'windows',
-  name: '我的电脑',
+  name: '',
   host: '',
   port: 22,
   user: '',
@@ -32,8 +33,8 @@ function llamaPlaceholder(os) {
   return '/usr/local/bin/llama-server'
 }
 // 引擎路径占位提示：vLLM 用命令名，llama.cpp 用完整路径
-function enginePlaceholder(engineType, os) {
-  if (engineType === 'vllm') return 'vllm（pip 安装后默认在 PATH，可留空）'
+function enginePlaceholder(engineType, os, t) {
+  if (engineType === 'vllm') return t('settings.vllmPlaceholder')
   return llamaPlaceholder(os)
 }
 function modelsPlaceholder(os) {
@@ -74,6 +75,7 @@ function SegButtons({ value, options, onChange }) {
 }
 
 export default function Settings({ targets, onSaved, onChanged }) {
+  const { t } = useI18n()
   const [form, setForm] = useState(EMPTY)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState(null)
@@ -146,27 +148,27 @@ export default function Settings({ targets, onSaved, onChanged }) {
 
   return (
     <div className="max-w-2xl">
-      <h1 className="text-2xl font-bold mb-2">目标机器设置</h1>
+      <h1 className="text-2xl font-bold mb-2">{t('settings.title')}</h1>
       <p className="text-gray text-sm mb-6">
-        配置你要部署/监控的机器：可以是本机，也可以是局域网内的其他电脑。
+        {t('settings.subtitle')}
       </p>
 
       <div className="bg-card rounded-xl p-6 border border-gray/30">
-        <Field label="机器名称">
-          <input className={inputCls} value={form.name} onChange={e => set('name', e.target.value)} />
+        <Field label={t('settings.name')}>
+          <input className={inputCls} placeholder={t('settings.defaultName')} value={form.name} onChange={e => set('name', e.target.value)} />
         </Field>
 
-        <Field label="连接方式">
-          <SegButtons value={form.conn_type} options={[['local', '本机'], ['ssh', '远程 (SSH)']]} onChange={switchConn} />
+        <Field label={t('settings.conn')}>
+          <SegButtons value={form.conn_type} options={[['local', t('settings.local')], ['ssh', t('settings.ssh')]]} onChange={switchConn} />
         </Field>
 
-        <Field label="操作系统">
+        <Field label={t('settings.os')}>
           {form.conn_type === 'local' ? (
             <div className="flex items-center gap-2 py-2 px-3 rounded-lg bg-bg border border-gray/40">
               <span className="w-2 h-2 rounded-full bg-green" />
               <span className="text-fg">
-                {localOs ? OS_LABEL[localOs] : '自动识别中...'}
-                <span className="text-gray text-xs ml-2">（本机自动检测）</span>
+                {localOs ? OS_LABEL[localOs] : t('settings.detecting')}
+                <span className="text-gray text-xs ml-2">{t('settings.autoDetected')}</span>
               </span>
             </div>
           ) : (
@@ -176,33 +178,33 @@ export default function Settings({ targets, onSaved, onChanged }) {
 
         {isRemote && (
           <div className="border-l-2 border-blue/40 pl-4 my-4">
-            <Field label="主机地址 (IP)">
+            <Field label={t('settings.host')}>
               <input className={inputCls} placeholder="192.168.1.100" value={form.host} onChange={e => set('host', e.target.value)} />
             </Field>
             <div className="grid grid-cols-2 gap-4">
-              <Field label="SSH 端口">
+              <Field label={t('settings.sshPort')}>
                 <input type="number" className={inputCls} value={form.port} onChange={e => set('port', +e.target.value)} />
               </Field>
-              <Field label="用户名">
+              <Field label={t('settings.user')}>
                 <input className={inputCls} value={form.user} onChange={e => set('user', e.target.value)} />
               </Field>
             </div>
-            <Field label="认证方式">
-              <SegButtons value={form.auth_type} options={[['key', '密钥'], ['password', '密码']]} onChange={v => set('auth_type', v)} />
+            <Field label={t('settings.auth')}>
+              <SegButtons value={form.auth_type} options={[['key', t('settings.key')], ['password', t('settings.password')]]} onChange={v => set('auth_type', v)} />
             </Field>
             {form.auth_type === 'key' ? (
-              <Field label="私钥路径" hint="留空则默认使用 ~/.ssh/id_rsa">
+              <Field label={t('settings.keyPath')} hint={t('settings.keyPathHint')}>
                 <input className={inputCls} placeholder="~/.ssh/id_rsa" value={form.key_path} onChange={e => set('key_path', e.target.value)} />
               </Field>
             ) : (
-              <Field label="密码">
+              <Field label={t('settings.password')}>
                 <input type="password" className={inputCls} value={form.password} onChange={e => set('password', e.target.value)} />
               </Field>
             )}
           </div>
         )}
 
-        <Field label="推理引擎">
+        <Field label={t('settings.engine')}>
           <SegButtons
             value={form.engine_type}
             options={
@@ -220,32 +222,32 @@ export default function Settings({ targets, onSaved, onChanged }) {
         {engineOsUnsupported && (
           <div className="mb-4 p-3 rounded-lg bg-yellow/10 text-yellow text-sm border border-yellow/30 flex items-start gap-2">
             <span className="mt-0.5 shrink-0"><IconAlert size={15} /></span>
-            <span>{curEngine?.windows_note || `所选引擎不支持 ${OS_LABEL[form.os]}，请改用其他引擎或调整目标系统`}</span>
+            <span>{curEngine?.windows_note || t('settings.engineUnsupported', { os: OS_LABEL[form.os] })}</span>
           </div>
         )}
 
         <Field
-          label={form.engine_type === 'vllm' ? 'vLLM 命令路径' : '推理引擎路径'}
+          label={form.engine_type === 'vllm' ? t('settings.vllmPath') : t('settings.enginePath')}
           hint={
             form.engine_type === 'vllm'
-              ? 'vllm 可执行命令，pip 安装后通常在 PATH，可留空（未安装可保存后用下方一键安装）'
-              : 'llama-server 可执行文件的完整路径（未安装可留空，保存后用下方一键安装）'
+              ? t('settings.vllmPathHint')
+              : t('settings.enginePathHint')
           }
         >
           <input
             className={inputCls}
-            placeholder={enginePlaceholder(form.engine_type, form.os)}
+            placeholder={enginePlaceholder(form.engine_type, form.os, t)}
             value={form.engine_path}
             onChange={e => set('engine_path', e.target.value)}
           />
         </Field>
 
         <Field
-          label="模型目录"
+          label={t('settings.modelsDir')}
           hint={
             form.engine_type === 'vllm'
-              ? '存放 HuggingFace safetensors 权重目录的父目录（vLLM 用模型 id 或本地权重目录）'
-              : '存放 .gguf 模型文件的目录'
+              ? t('settings.modelsDirVllm')
+              : t('settings.modelsDirLlama')
           }
         >
           <input
@@ -256,7 +258,7 @@ export default function Settings({ targets, onSaved, onChanged }) {
           />
         </Field>
 
-        <Field label="服务端口" hint="llama-server 监听的端口">
+        <Field label={t('settings.servicePort')} hint={t('settings.servicePortHint')}>
           <input type="number" className={inputCls} value={form.service_port} onChange={e => set('service_port', +e.target.value)} />
         </Field>
 
@@ -266,24 +268,24 @@ export default function Settings({ targets, onSaved, onChanged }) {
             disabled={testing}
             className="flex-1 py-2 rounded-lg border border-blue text-blue font-semibold disabled:opacity-40 hover:bg-blue/10 transition"
           >
-            {testing ? '测试中...' : '测试连接'}
+            {testing ? t('settings.testing') : t('settings.testConn')}
           </button>
           <button
             onClick={save}
             className="flex-1 py-2 rounded-lg bg-green text-bg font-bold hover:opacity-90 transition"
           >
-            保存
+            {t('settings.save')}
           </button>
         </div>
 
         {testResult && (
           <div className={`mt-4 p-3 rounded-lg text-sm ${testResult.ok ? 'bg-green/10 text-green' : 'bg-red/10 text-red'}`}>
-            <div className="font-semibold mb-1 inline-flex items-center gap-1.5">{testResult.ok ? <><IconCheck size={15} />连接成功</> : <><IconX size={15} />连接失败</>}</div>
+            <div className="font-semibold mb-1 inline-flex items-center gap-1.5">{testResult.ok ? <><IconCheck size={15} />{t('settings.connOk')}</> : <><IconX size={15} />{t('settings.connFail')}</>}</div>
             <div>{testResult.message}</div>
             {testResult.hardware?.gpu && (
               <div className="mt-2 text-fg/80">
                 GPU: {testResult.hardware.gpu.name} ({testResult.hardware.gpu.total_memory_gb}G) ·
-                内存: {testResult.hardware.memory?.total_gb}G
+                {t('settings.memory')} {testResult.hardware.memory?.total_gb}G
               </div>
             )}
           </div>
@@ -293,13 +295,13 @@ export default function Settings({ targets, onSaved, onChanged }) {
       {/* 引擎安装面板 */}
       {targets?.length > 0 && (
         <div className="mt-8">
-          <h2 className="text-xl font-bold mb-2">推理引擎</h2>
+          <h2 className="text-xl font-bold mb-2">{t('settings.engines')}</h2>
           <p className="text-gray text-sm mb-4">
-            检测各机器是否已安装其配置的引擎（llama.cpp / vLLM），未安装可一键安装（自动下载/编译/pip 并回填路径）。
+            {t('settings.enginesHint')}
           </p>
           <div className="space-y-3">
-            {targets.map(t => (
-              <EngineRow key={t.id} target={t} onChanged={onChanged} />
+            {targets.map(tg => (
+              <EngineRow key={tg.id} target={tg} onChanged={onChanged} />
             ))}
           </div>
         </div>
@@ -309,6 +311,7 @@ export default function Settings({ targets, onSaved, onChanged }) {
 }
 
 function EngineRow({ target, onChanged }) {
+  const { t } = useI18n()
   const [state, setState] = useState('checking') // checking | installed | missing | installing
   const [engine, setEngine] = useState(null)
   const [logs, setLogs] = useState([])
@@ -343,7 +346,7 @@ function EngineRow({ target, onChanged }) {
     })
     const d = await res.json()
     if (!d.ok) {
-      setLogs([{ t: '--:--:--', msg: d.message || '启动失败' }])
+      setLogs([{ t: '--:--:--', msg: d.message || t('settings.installFail') }])
       setState('missing')
       return
     }
@@ -365,10 +368,10 @@ function EngineRow({ target, onChanged }) {
   }
 
   const badge = {
-    checking: { text: '检测中...', cls: 'bg-gray/20 text-gray' },
-    installed: { text: '已安装', cls: 'bg-green/20 text-green' },
-    missing: { text: '未安装', cls: 'bg-yellow/20 text-yellow' },
-    installing: { text: '安装中...', cls: 'bg-blue/20 text-blue' },
+    checking: { text: t('settings.badge.checking'), cls: 'bg-gray/20 text-gray' },
+    installed: { text: t('settings.badge.installed'), cls: 'bg-green/20 text-green' },
+    missing: { text: t('settings.badge.missing'), cls: 'bg-yellow/20 text-yellow' },
+    installing: { text: t('settings.badge.installing'), cls: 'bg-blue/20 text-blue' },
   }[state]
 
   return (
@@ -382,7 +385,7 @@ function EngineRow({ target, onChanged }) {
             </span>
           </div>
           <div className="text-xs text-gray">
-            {target.os} · {target.conn_type === 'ssh' ? target.host : '本机'}
+            {target.os} · {target.conn_type === 'ssh' ? target.host : t('settings.local')}
             {engine?.version && <span className="ml-2 text-green">{engine.version}</span>}
           </div>
         </div>
@@ -393,23 +396,23 @@ function EngineRow({ target, onChanged }) {
               onClick={install}
               className="bg-blue text-bg text-sm font-semibold px-4 py-1.5 rounded-lg hover:opacity-90 transition"
             >
-              一键安装
+              {t('settings.install')}
             </button>
           )}
           {state === 'installed' && (
-            <button onClick={check} className="text-gray text-sm hover:text-fg transition">重新检测</button>
+            <button onClick={check} className="text-gray text-sm hover:text-fg transition">{t('settings.recheck')}</button>
           )}
         </div>
       </div>
 
       {engine?.installed && engine.path && (
-        <div className="text-xs text-gray/70 mt-2 truncate">路径: {engine.path}</div>
+        <div className="text-xs text-gray/70 mt-2 truncate">{t('settings.path')} {engine.path}</div>
       )}
 
       {(showLogs && logs.length > 0) && (
         <div className="mt-3">
           <button onClick={() => setShowLogs(s => !s)} className="text-xs text-gray mb-1">
-            {showLogs ? '收起日志 ▲' : '查看日志 ▼'}
+            {showLogs ? t('settings.hideLogs') : t('settings.showLogs')}
           </button>
           <div className="bg-bg rounded-lg p-3 max-h-48 overflow-auto font-mono text-xs text-fg/80 space-y-0.5">
             {logs.map((l, i) => (

@@ -4,7 +4,7 @@
 
 # ReadyLLM
 
-**A local / LAN LLM deployment, monitoring & tuning assistant**
+**Make your local LLM up to 50% faster — auto tuning, AI tuning & real-time monitoring**
 
 Deploy, monitor, and tune large language models through a visual interface — plus image / video generation on top of ComfyUI.
 
@@ -21,19 +21,39 @@ Deploy, monitor, and tune large language models through a visual interface — p
 
 ---
 
-**ReadyLLM** is a visual assistant for local and LAN machines. It is not tied to any specific environment — target device, inference engine path, model directory, and port are all configured by you in the UI, and the tool probes hardware, installs engines, launches services, and optimizes parameters against your actual setup. The same interface manages both the local machine and other computers on your network over SSH.
+Out of the box, ollama often leaves most of your model on the CPU — you get ~10 t/s and a GPU that barely warms up. **ReadyLLM** finds the parameters that actually fit your hardware, squeezes the speed back out, and keeps watching it live.
+
+![Before vs after tuning](docs/benchmark.svg)
+
+> Same model · same quantization · same context length — peak **+37%**, average **+33%**, 100K context **+50%**.
+
+## Quick Start
+
+```bash
+# 1. Backend
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 2. Frontend
+cd frontend
+npm install && npm run dev
+```
+
+Open `http://localhost:3000`, add a target machine, pick a model, and hit **Tune**.
+Full setup (venv, production build, configuration) is in [Getting Started](#getting-started).
 
 ## Preview
 
-![Real-time monitor](docs/screenshots/monitor.png)
+![Real-time monitor](docs/screenshots-en/monitor.png)
 
 > Real-time monitoring: GPU / VRAM / throughput / latency metric curves
 
-![Smart tuning](docs/screenshots/tune.png)
+![Smart tuning](docs/screenshots-en/tune.png)
 
 > Smart tuning: two-phase parameter search and benchmark results
 
-![Target machine settings](docs/screenshots/setting.png)
+![Target machine settings](docs/screenshots-en/setting.png)
 
 > Target machine settings: local or remote over SSH, engine and model directory configuration
 
@@ -134,7 +154,7 @@ model-deploy-assistant/
 │       ├── pages/             # Monitor / Store / Deploy / Tune / Settings
 │       ├── components/        # Icons / Logo / ProgressPanel
 │       └── hooks/useWebSocket.js
-└── docs/screenshots/          # UI screenshots
+└── docs/screenshots-en/        # UI screenshots (English)
 ```
 
 ## Getting Started

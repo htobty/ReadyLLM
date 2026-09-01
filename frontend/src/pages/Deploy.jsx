@@ -1,15 +1,17 @@
 import { useState, useEffect, useRef } from 'react'
 import { IconRefresh, IconPlay, IconStop, IconRocket } from '../components/Icons'
 import LongVideoDeploy from './LongVideoDeploy'
+import { useI18n } from '../i18n/I18nContext'
 
 export default function Deploy({ targetId, target }) {
+  const { t } = useI18n()
   const isVideo = target?.engine_type === 'comfyui'
   const [videoMode, setVideoMode] = useState('short') // short | long
   if (!isVideo) return <TextDeploy targetId={targetId} target={target} />
   return (
     <div>
       <div className="inline-flex gap-1 p-1 rounded-lg bg-card border border-gray/30 mb-6">
-        {[['short', '短视频'], ['long', '长视频']].map(([k, label]) => (
+        {[['short', t('deploy.shortVideo')], ['long', t('deploy.longVideo')]].map(([k, label]) => (
           <button key={k} onClick={() => setVideoMode(k)}
             className={`px-4 py-1.5 rounded-md text-sm transition ${
               videoMode === k ? 'bg-blue text-bg font-semibold' : 'text-gray hover:text-fg'}`}>
@@ -27,6 +29,7 @@ export default function Deploy({ targetId, target }) {
 /* ==================== 文本模型部署（llama.cpp / vLLM） ==================== */
 
 function TextDeploy({ targetId }) {
+  const { t } = useI18n()
   const [models, setModels] = useState([])
   const [selected, setSelected] = useState('')
   const [status, setStatus] = useState(null)
@@ -38,16 +41,26 @@ function TextDeploy({ targetId }) {
   useEffect(() => {
     if (!targetId) return
     setMsg('')
-    fetch(`/api/deploy/models?target_id=${targetId}`)
-      .then(r => r.json())
-      .then(d => {
-        setModels(d.models || [])
-        setSelected(d.models?.[0] || '')
-        if (d.error) setMsg(d.error)
-      })
-    fetch(`/api/deploy/status?target_id=${targetId}`)
-      .then(r => r.json())
-      .then(setStatus)
+    // 并发拉模型列表与运行状态，等齐后再决定选中项：
+    // 若当前有模型正在运行（status.model），固定选中它，刷新页面不再回退默认。
+    Promise.all([
+      fetch(`/api/deploy/models?target_id=${targetId}`).then(r => r.json()),
+      fetch(`/api/deploy/status?target_id=${targetId}`).then(r => r.json()),
+    ]).then(([md, st]) => {
+      const list = md.models || []
+      setModels(list)
+      setStatus(st)
+      if (md.error) setMsg(md.error)
+      if (st.running && st.model && list.includes(st.model)) {
+        setSelected(st.model)
+      } else {
+        setSelected(list[0] || '')
+      }
+    }).catch(() => {
+      fetch(`/api/deploy/models?target_id=${targetId}`)
+        .then(r => r.json())
+        .then(d => { setModels(d.models || []); setSelected(d.models?.[0] || '') })
+    })
   }, [targetId])
 
   // 模型选定后拉取默认参数：优先最近调优，回退确定性生成
@@ -84,7 +97,7 @@ function TextDeploy({ targetId }) {
   }
 
   async function start() {
-    setMsg('启动中...')
+    setMsg(t('deploy.starting'))
     const res = await fetch('/api/deploy/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -96,7 +109,7 @@ function TextDeploy({ targetId }) {
   }
 
   async function stop() {
-    setMsg('停止中...')
+    setMsg(t('deploy.stopping'))
     const res = await fetch(`/api/deploy/stop?target_id=${targetId}`, { method: 'POST' })
     const d = await res.json()
     setMsg(d.message)
@@ -113,60 +126,60 @@ function TextDeploy({ targetId }) {
   }
 
   const sourceLabel = {
-    tuner: '自动调优回填',
-    ai_tuner: 'AI 调优回填',
-    generated: '硬件自适应生成',
-    default: '引擎默认',
+    tuner: t('deploy.source.tuner'),
+    ai_tuner: t('deploy.source.ai_tuner'),
+    generated: t('deploy.source.generated'),
+    default: t('deploy.source.default'),
   }[argsMeta?.source] || ''
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">模型部署</h1>
+      <h1 className="text-2xl font-bold mb-6">{t('deploy.title')}</h1>
 
       <div className="bg-card rounded-xl p-6 border border-gray/30 max-w-2xl">
         <div className="flex items-center gap-3 mb-6">
           <span className={`w-3 h-3 rounded-full ${status?.running ? 'bg-green' : 'bg-gray'}`} />
-          <span className="font-semibold">{status?.running ? '运行中' : '未运行'}</span>
+          <span className="font-semibold">{status?.running ? t('deploy.running') : t('deploy.stopped')}</span>
           {status?.engine && (
             <span className="text-xs px-2 py-0.5 rounded bg-blue/15 text-blue">
-              引擎: {status.engine === 'vllm' ? 'vLLM' : 'llama.cpp'}
+              {t('deploy.engine')} {status.engine === 'vllm' ? 'vLLM' : 'llama.cpp'}
             </span>
           )}
         </div>
 
-        <label className="block text-gray text-sm mb-2">选择模型</label>
+        <label className="block text-gray text-sm mb-2">{t('deploy.selectModel')}</label>
         <select
           value={selected}
           onChange={e => setSelected(e.target.value)}
           className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 mb-2 text-fg"
         >
-          {models.length === 0 && <option value="">（模型目录为空或未配置）</option>}
+          {models.length === 0 && <option value="">{t('deploy.emptyDir')}</option>}
           {models.map(m => (
             <option key={m} value={m}>{m}</option>
           ))}
         </select>
-        <div className="text-xs text-gray/70 mb-6">共 {models.length} 个 .gguf 模型</div>
+        <div className="text-xs text-gray/70 mb-6">{t('deploy.modelCount', { n: models.length })}</div>
 
         <div className="flex items-center justify-between mb-2">
-          <label className="block text-gray text-sm">运行参数</label>
+          <label className="block text-gray text-sm">{t('deploy.argsLabel')}</label>
           <button
             onClick={resetArgs}
             disabled={!selected || loadingArgs}
             className="text-xs text-blue hover:underline disabled:opacity-40"
           >
-            {loadingArgs ? '加载参数中...' : (<span className="inline-flex items-center gap-1"><IconRefresh size={13} />恢复默认</span>)}
+            {loadingArgs ? t('deploy.loadingArgs') : (<span className="inline-flex items-center gap-1"><IconRefresh size={13} />{t('deploy.resetDefault')}</span>)}
           </button>
         </div>
         {argsMeta && sourceLabel && (
           <div className="text-xs mb-2">
-            <span className="text-gray">来源：</span>
+            <span className="text-gray">{t('deploy.sourceLabel')}</span>
             <span className={
               argsMeta.source === 'generated' || argsMeta.source === 'default'
                 ? 'text-gray' : 'text-green'
             }>
               {sourceLabel}
             </span>
-            {argsMeta.score > 0 && <span className="text-gray"> · 实测 {argsMeta.score} t/s</span>}
+            {argsMeta.score > 0 && <span className="text-gray"> · {t('deploy.score', { score: argsMeta.score })}</span>}
             {argsMeta.ts && <span className="text-gray/60"> · {argsMeta.ts}</span>}
           </div>
         )}
@@ -178,7 +191,7 @@ function TextDeploy({ targetId }) {
           className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 text-fg font-mono text-xs h-24 focus:border-blue outline-none resize-y"
         />
         <div className="text-xs text-gray/60 mb-6">
-          可手动编辑。端口 / 监听地址 / 监控开关由系统自动注入，无需在此填写。
+          {t('deploy.argsHint')}
         </div>
 
         <div className="flex gap-3">
@@ -187,14 +200,14 @@ function TextDeploy({ targetId }) {
             disabled={status?.running || !selected}
             className="flex-1 bg-green text-bg font-bold py-2 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition"
           >
-            <span className="inline-flex items-center justify-center gap-1.5"><IconPlay size={14} />启动</span>
+            <span className="inline-flex items-center justify-center gap-1.5"><IconPlay size={14} />{t('deploy.start')}</span>
           </button>
           <button
             onClick={stop}
             disabled={!status?.running}
             className="flex-1 bg-red text-bg font-bold py-2 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition"
           >
-            <span className="inline-flex items-center justify-center gap-1.5"><IconStop size={13} />停止</span>
+            <span className="inline-flex items-center justify-center gap-1.5"><IconStop size={13} />{t('deploy.stop')}</span>
           </button>
         </div>
 
@@ -209,10 +222,11 @@ function TextDeploy({ targetId }) {
 const RES_PRESETS = [
   { label: '480p (832×480)', width: 832, height: 480 },
   { label: '720p (1280×720)', width: 1280, height: 720 },
-  { label: '竖屏 (480×832)', width: 480, height: 832 },
+  { label: 'Portrait (480×832)', width: 480, height: 832 },
 ]
 
 function VideoDeploy({ targetId, target }) {
+  const { t } = useI18n()
   const [models, setModels] = useState([])
   const [selected, setSelected] = useState('')
   const [status, setStatus] = useState(null)
@@ -274,7 +288,7 @@ function VideoDeploy({ targetId, target }) {
   }
 
   async function startEngine() {
-    setMsg('启动 ComfyUI 中...')
+    setMsg(t('deploy.startingComfyui'))
     const res = await fetch('/api/deploy/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -286,7 +300,7 @@ function VideoDeploy({ targetId, target }) {
   }
 
   async function stopEngine() {
-    setMsg('停止中...')
+    setMsg(t('deploy.stopping'))
     const res = await fetch(`/api/deploy/stop?target_id=${targetId}`, { method: 'POST' })
     const d = await res.json()
     setMsg(d.message)
@@ -314,7 +328,7 @@ function VideoDeploy({ targetId, target }) {
       }),
     })
     const d = await res.json()
-    if (!d.success) { setMsg(d.message || '提交失败'); return }
+    if (!d.success) { setMsg(d.message || t('deploy.submitFail')); return }
     setJob({
       prompt_id: d.prompt_id,
       state: 'queued',
@@ -325,68 +339,68 @@ function VideoDeploy({ targetId, target }) {
   }
 
   const stateLabel = {
-    queued: '排队中…',
-    running: '生成中…（首次加载模型较慢，请耐心等待）',
-    completed: '生成完成',
-    unknown: '状态未知',
-    error: '出错',
+    queued: t('deploy.status.queued'),
+    running: t('deploy.status.running'),
+    completed: t('deploy.status.completed'),
+    unknown: t('deploy.status.unknown'),
+    error: t('deploy.status.error'),
   }[job?.state] || ''
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">视频生成</h1>
+      <h1 className="text-2xl font-bold mb-6">{t('deploy.videoTitle')}</h1>
 
       <div className="bg-card rounded-xl p-6 border border-gray/30 max-w-2xl">
         <div className="flex items-center gap-3 mb-6">
           <span className={`w-3 h-3 rounded-full ${status?.running ? 'bg-green' : 'bg-gray'}`} />
-          <span className="font-semibold">{status?.running ? 'ComfyUI 运行中' : 'ComfyUI 未运行'}</span>
-          <span className="text-xs px-2 py-0.5 rounded bg-purple/15 text-purple">引擎: ComfyUI</span>
+          <span className="font-semibold">{status?.running ? t('deploy.comfyuiRunning') : t('deploy.comfyuiStopped')}</span>
+          <span className="text-xs px-2 py-0.5 rounded bg-purple/15 text-purple">{t('deploy.engine')} ComfyUI</span>
         </div>
 
         {!status?.running ? (
           <div className="mb-6">
             <div className="text-sm text-gray mb-3">
-              视频生成需先启动 ComfyUI 服务。请确认已在设置中配置 ComfyUI 安装目录，如未安装可一键安装。
+              {t('deploy.comfyuiHint')}
             </div>
             <div className="flex gap-3">
               <button
                 onClick={startEngine}
                 className="flex-1 bg-green text-bg font-bold py-2 rounded-lg hover:opacity-90 transition"
               >
-                <span className="inline-flex items-center justify-center gap-1.5"><IconPlay size={14} />启动 ComfyUI</span>
+                <span className="inline-flex items-center justify-center gap-1.5"><IconPlay size={14} />{t('deploy.startComfyui')}</span>
               </button>
               <button
                 onClick={stopEngine}
                 disabled={!status?.running}
                 className="flex-1 bg-red text-bg font-bold py-2 rounded-lg disabled:opacity-40 hover:opacity-90 transition"
               >
-                <span className="inline-flex items-center justify-center gap-1.5"><IconStop size={13} />停止</span>
+                <span className="inline-flex items-center justify-center gap-1.5"><IconStop size={13} />{t('deploy.stop')}</span>
               </button>
             </div>
             {msg && <div className="mt-3 text-sm text-gray">{msg}</div>}
           </div>
         ) : (
           <>
-            <label className="block text-gray text-sm mb-2">视频模型</label>
+            <label className="block text-gray text-sm mb-2">{t('deploy.videoModel')}</label>
             <select
               value={selected}
               onChange={e => setSelected(e.target.value)}
               className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 mb-1 text-fg"
             >
-              {models.length === 0 && <option value="">（无可用视频模型，请先到商店下载）</option>}
+              {models.length === 0 && <option value="">{t('deploy.noVideoModel')}</option>}
               {models.map(m => (
                 <option key={m.filename} value={m.filename}>
                   {m.name}
                 </option>
               ))}
             </select>
-            <div className="text-xs text-gray/70 mb-5">共 {models.length} 个视频模型</div>
+            <div className="text-xs text-gray/70 mb-5">{t('deploy.videoModelCount', { n: models.length })}</div>
 
-            <label className="block text-gray text-sm mb-2">画面描述（Prompt）</label>
+            <label className="block text-gray text-sm mb-2">{t('deploy.promptLabel')}</label>
             <textarea
               value={form.prompt}
               onChange={e => set('prompt', e.target.value)}
-              placeholder="一只在雪地里奔跑的柴犬，电影质感，慢动作"
+              placeholder={t('deploy.promptPlaceholder')}
               className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 text-fg text-sm h-20 focus:border-blue outline-none resize-y mb-2"
             />
 
@@ -403,13 +417,13 @@ function VideoDeploy({ targetId, target }) {
                   form.enhance ? 'translate-x-4' : ''
                 }`} />
               </span>
-              <span className="text-sm text-fg">AI 智能编排</span>
+              <span className="text-sm text-fg">{t('deploy.aiEnhance')}</span>
               <span className="text-xs text-gray/70">
-                {form.enhance ? '大模型将把你的描述扩写成电影级提示词并推荐参数' : '直接使用你填写的提示词与参数'}
+                {form.enhance ? t('deploy.enhanceOn') : t('deploy.enhanceOff')}
               </span>
             </button>
 
-            <label className="block text-gray text-sm mb-2">分辨率</label>
+            <label className="block text-gray text-sm mb-2">{t('deploy.resolution')}</label>
             <div className="flex gap-2 mb-4">
               {RES_PRESETS.map(r => (
                 <button
@@ -427,13 +441,13 @@ function VideoDeploy({ targetId, target }) {
             </div>
 
             <div className="grid grid-cols-3 gap-3 mb-4">
-              <Field label="帧数" value={form.length} onChange={v => set('length', v)} hint="≈时长×fps" />
-              <Field label="步数" value={form.steps} onChange={v => set('steps', v)} hint="越高越清晰" />
-              <Field label="CFG" value={form.cfg} onChange={v => set('cfg', v)} hint="提示词强度" />
+              <Field label={t('deploy.frames')} value={form.length} onChange={v => set('length', v)} hint={t('deploy.framesHint')} />
+              <Field label={t('deploy.steps')} value={form.steps} onChange={v => set('steps', v)} hint={t('deploy.stepsHint')} />
+              <Field label="CFG" value={form.cfg} onChange={v => set('cfg', v)} hint={t('deploy.cfg')} />
             </div>
             <div className="grid grid-cols-2 gap-3 mb-6">
-              <Field label="帧率 fps" value={form.fps} onChange={v => set('fps', v)} />
-              <Field label="种子" value={form.seed} onChange={v => set('seed', v)} placeholder="留空随机" />
+              <Field label={t('deploy.fps')} value={form.fps} onChange={v => set('fps', v)} />
+              <Field label={t('deploy.seed')} value={form.seed} onChange={v => set('seed', v)} placeholder={t('deploy.seedPlaceholder')} />
             </div>
 
             <button
@@ -441,7 +455,7 @@ function VideoDeploy({ targetId, target }) {
               disabled={!form.prompt || !selected}
               className="w-full bg-gradient-to-r from-blue to-purple text-bg font-bold py-2.5 rounded-lg disabled:opacity-40 hover:opacity-90 transition"
             >
-              <span className="inline-flex items-center justify-center gap-1.5"><IconRocket size={15} />生成视频</span>
+              <span className="inline-flex items-center justify-center gap-1.5"><IconRocket size={15} />{t('deploy.generate')}</span>
             </button>
             {msg && <div className="mt-3 text-sm text-red">{msg}</div>}
           </>
@@ -458,7 +472,7 @@ function VideoDeploy({ targetId, target }) {
             </div>
             {job.enhanced && (
               <div className="mb-3 p-3 rounded-lg bg-blue/5 border border-blue/20">
-                <div className="text-xs font-semibold text-blue mb-1">AI 已编排提示词</div>
+                <div className="text-xs font-semibold text-blue mb-1">{t('deploy.aiPrompt')}</div>
                 {job.final_prompt && (
                   <div className="text-xs text-fg/80 italic leading-relaxed mb-1">“{job.final_prompt}”</div>
                 )}
@@ -490,11 +504,11 @@ function VideoDeploy({ targetId, target }) {
                     </div>
                   )
                 })}
-                <div className="mt-1 text-gray/60">文件保存在目标机 ComfyUI/output 目录</div>
+                <div className="mt-1 text-gray/60">{t('deploy.fileSaved')}</div>
               </div>
             )}
             {job.state === 'completed' && (!job.files || job.files.length === 0) && (
-              <div className="text-xs text-gray">任务已完成，但未检测到输出文件（请检查 ComfyUI 日志）</div>
+              <div className="text-xs text-gray">{t('deploy.noOutput')}</div>
             )}
           </div>
         )}

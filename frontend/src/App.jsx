@@ -9,17 +9,27 @@ import {
   IconServer,
 } from './components/Icons'
 import Logo from './components/Logo'
+import { I18nProvider, useI18n, LangSwitch } from './i18n/I18nContext'
 
 // 首页直接复用实时监控视图
 const NAV_ITEMS = [
-  { id: 'dashboard', label: '实时监控', icon: IconActivity },
-  { id: 'store', label: '模型商店', icon: IconStore },
-  { id: 'deploy', label: '部署', icon: IconRocket },
-  { id: 'tune', label: '智能调优', icon: IconSliders },
-  { id: 'settings', label: '设置', icon: IconSettings },
+  { id: 'dashboard', label: 'nav.monitor', icon: IconActivity },
+  { id: 'store', label: 'nav.store', icon: IconStore },
+  { id: 'deploy', label: 'nav.deploy', icon: IconRocket },
+  { id: 'tune', label: 'nav.tune', icon: IconSliders },
+  { id: 'settings', label: 'nav.settings', icon: IconSettings },
 ]
 
 export default function App() {
+  return (
+    <I18nProvider>
+      <AppInner />
+    </I18nProvider>
+  )
+}
+
+function AppInner() {
+  const { t } = useI18n()
   const [page, setPage] = useState('dashboard')
   const [targets, setTargets] = useState([])
   const [targetId, setTargetId] = useState('')
@@ -61,7 +71,7 @@ export default function App() {
           <Logo size={38} />
           <div className="leading-tight">
             <div className="font-bold text-[17px] tracking-tight bg-gradient-to-r from-blue via-purple to-teal bg-clip-text text-transparent">ReadyLLM</div>
-            <div className="text-[11px] text-gray">本地大模型部署助手</div>
+            <div className="text-[11px] text-gray">{t('brand.sub')}</div>
           </div>
         </div>
 
@@ -88,7 +98,7 @@ export default function App() {
                 <span className={active ? 'text-blue' : 'text-fg/45 group-hover:text-fg/80'}>
                   <Icon size={18} />
                 </span>
-                {item.label}
+                {t(item.label)}
               </button>
             )
           })}
@@ -98,21 +108,22 @@ export default function App() {
         {page !== 'settings' && hasTarget && (
           <div className="mt-auto pt-4 border-t border-white/5">
             <div className="text-[11px] uppercase tracking-wider text-gray mb-2 px-2 flex items-center gap-1.5">
-              <IconServer size={13} /> 目标机器
+              <IconServer size={13} /> {t('app.targetMachine')}
             </div>
             <select
               value={targetId}
               onChange={e => setTargetId(e.target.value)}
               className="w-full bg-bg/60 border border-white/10 rounded-lg px-3 py-2 text-sm text-fg focus:border-blue/50 outline-none transition"
             >
-              {targets.map(t => (
-                <option key={t.id} value={t.id}>
-                  {t.name} ({t.conn_type === 'ssh' ? t.host : '本机'})
+              {targets.map(tg => (
+                <option key={tg.id} value={tg.id}>
+                  {tg.name} ({tg.conn_type === 'ssh' ? tg.host : t('app.local')})
                 </option>
               ))}
             </select>
           </div>
         )}
+        <LangSwitch />
       </nav>
 
       {/* 主内容 */}
@@ -124,15 +135,15 @@ export default function App() {
             <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-blue/20 to-purple/20 border border-white/10 flex items-center justify-center text-blue mb-6 shadow-glow">
               <IconSettings size={36} />
             </div>
-            <div className="text-2xl font-bold mb-3 tracking-tight">还没有配置目标机器</div>
+            <div className="text-2xl font-bold mb-3 tracking-tight">{t('app.noTarget')}</div>
             <div className="text-gray mb-8 max-w-md leading-relaxed">
-              请先添加你要部署 / 监控的模型机器，可以是本机，也可以是局域网内的其他电脑。
+              {t('app.noTargetHint')}
             </div>
             <button
               onClick={() => setPage('settings')}
               className="bg-blue text-bg font-bold px-7 py-2.5 rounded-xl hover:opacity-90 transition shadow-glow"
             >
-              前往设置
+              {t('app.goSettings')}
             </button>
           </div>
         ) : page === 'dashboard' ? (

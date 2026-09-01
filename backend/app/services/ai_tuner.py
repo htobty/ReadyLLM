@@ -220,18 +220,30 @@ def _build_test_result_message(round_num: int, params: dict, metrics: dict) -> s
 
 # ==================== LLM 调用 ====================
 
-def _call_llm(cfg: dict, messages: List[dict]) -> Optional[str]:
-    """调用 OpenAI 兼容 API，返回 assistant 消息内容"""
+def _call_llm(cfg: dict, messages: List[dict], job_id: str = None) -> Optional[str]:
+    """调用 OpenAI 兼容 API，返回 assistant 消息内容。
+    失败时把真实原因写入 job 日志（之前 except Exception 直接吞掉，无法定位）。
+    """
+    def _log(msg: str):
+        if job_id:
+            _append_log(job_id, msg)
+
     url = cfg.get("api_url", "").rstrip("/")
+    if not url:
+        _log("  LLM 失败: API 地址为空，请先在 AI 调优设置里填写 api_url")
+        return None
     if not url.endswith("/chat/completions"):
         if "/v1" in url:
             url = f"{url}/chat/completions"
         else:
             url = f"{url}/v1/chat/completions"
+    _log(f"  → 请求 LLM: {url} | model={cfg.get('model_name', '')}")
 
     headers = {"Content-Type": "application/json"}
     if cfg.get("api_key"):
         headers["Authorization"] = f"Bearer {cfg['api_key']}"
+    else:
+        _log("  ⚠ 未配置 API Key（若服务需要鉴权会返回 401）")
 
     payload = json.dumps({
         "model": cfg.get("model_name", ""),
@@ -247,8 +259,19 @@ def _call_llm(cfg: dict, messages: List[dict]) -> Optional[str]:
             choices = data.get("choices", [])
             if choices:
                 return choices[0].get("message", {}).get("content", "")
-    except Exception:
-        return None
+            # 请求成功但无 choices：多半是模型名不对或返回结构异常
+            _log(f"  LLM 返回无 choices，原始响应: {json.dumps(data, ensure_ascii=False)[:400]}")
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode(errors="replace")[:400]
+        except Exception:
+            pass
+        _log(f"  LLM HTTP {e.code} 错误: {body}")
+    except urllib.error.URLError as e:
+        _log(f"  LLM 网络错误（地址不通/超时/DNS）: {e.reason}")
+    except Exception as e:
+        _log(f"  LLM 调用异常: {type(e).__name__}: {e}")
     return None
 
 
@@ -464,9 +487,9 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
                 _append_log(job_id, f"【第 {round_num}/{MAX_ROUNDS} 轮】调用 AI 分析...")
 
                 # 调 LLM
-                response = _call_llm(cfg, messages)
+                response = _call_llm(cfg, messages, job_id)
                 if response is None:
-                    _fail(job_id, f"第 {round_num} 轮 LLM 调用失败")
+                    _fail(job_id, f"第 {round_num} 轮 LLM 调用失败（原因见上方日志）")
                     return
 
                 parsed = _parse_llm_response(response)

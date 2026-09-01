@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
 import { IconCheck, IconX, IconAlert, IconDownload, IconHeart, IconRefresh } from '../components/Icons'
+import { useI18n } from '../i18n/I18nContext'
 
 const SOURCES = [
-  ['hf-mirror', 'HF 镜像站', '国内推荐'],
-  ['modelscope', '魔搭', '国内最快'],
-  ['huggingface', 'HuggingFace', '境外源'],
+  'hf-mirror',
+  'modelscope',
+  'huggingface',
 ]
 
 function fmtMB(bytes) {
@@ -17,6 +18,7 @@ function fmtGB(gb) {
 }
 
 function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activeJob, onJobStarted }) {
+  const { t } = useI18n()
   const [state, setState] = useState(activeJob ? 'downloading' : 'idle')
   const [percent, setPercent] = useState(0)
   const [detail, setDetail] = useState('')
@@ -46,7 +48,7 @@ function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activ
           } else if (job.status === 'failed') {
             clearInterval(pollRef.current)
             setState('failed')
-            setDetail(job.error || '下载失败')
+            setDetail(job.error || t('store.downloadFail'))
           }
         } catch { /* ignore */ }
       }, 2000)
@@ -66,12 +68,12 @@ function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activ
     source === 'modelscope' && !(model.available_sources || []).includes('modelscope')
       ? 'hf-mirror'
       : source
-  const srcLabel = SOURCES.find(s => s[0] === effectiveSource)?.[1] || effectiveSource
+  const srcLabel = t(`store.src.${effectiveSource}`)
 
   async function startDownload() {
     setState('downloading')
     setPercent(0)
-    setDetail('准备下载...')
+    setDetail(t('store.preparing'))
     setShowLogs(true)
     const res = await fetch('/api/store/download', {
       method: 'POST',
@@ -81,7 +83,7 @@ function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activ
     const d = await res.json()
     if (!d.ok) {
       setState('failed')
-      setDetail(d.message || '启动失败')
+      setDetail(d.message || t('store.startFail'))
       return
     }
     const jobId = d.job_id
@@ -100,7 +102,7 @@ function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activ
       } else if (job.status === 'failed') {
         clearInterval(pollRef.current)
         setState('failed')
-        setDetail(job.error || '下载失败')
+        setDetail(job.error || t('store.downloadFail'))
       }
     }, 2000)
   }
@@ -121,15 +123,15 @@ function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activ
       )
     }
     if (state === 'success') {
-      return <span className="text-xs text-green px-3 py-2 inline-flex items-center gap-1"><IconCheck size={13} />下载完成</span>
+      return <span className="text-xs text-green px-3 py-2 inline-flex items-center gap-1"><IconCheck size={13} />{t('store.downloaded')}</span>
     }
     if (isComplete) {
-      return <span className="text-xs text-green px-3 py-2 inline-flex items-center gap-1"><IconCheck size={13} />已下载 {fmtGB(fileInfo.size_gb)}</span>
+      return <span className="text-xs text-green px-3 py-2 inline-flex items-center gap-1"><IconCheck size={13} />{t('store.downloadedSize', { size: fmtGB(fileInfo.size_gb) })}</span>
     }
     if (isIncomplete) {
       return (
         <div className="w-32 text-right">
-          <div className="text-xs text-orange mb-1 inline-flex items-center gap-1 justify-end"><IconAlert size={12} />不完整 {incompletePercent}%</div>
+          <div className="text-xs text-orange mb-1 inline-flex items-center gap-1 justify-end"><IconAlert size={12} />{t('store.incomplete', { pct: incompletePercent })}</div>
           <div className="h-1.5 bg-gray/30 rounded-full overflow-hidden mb-1">
             <div className="h-full bg-orange transition-all" style={{ width: `${incompletePercent}%` }} />
           </div>
@@ -137,7 +139,7 @@ function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activ
             onClick={startDownload}
             className="text-xs text-blue underline hover:opacity-80"
           >
-            继续下载
+            {t('store.resume')}
           </button>
         </div>
       )
@@ -148,7 +150,7 @@ function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activ
         disabled={fits}
         className="bg-blue text-bg text-sm font-semibold px-4 py-2 rounded-lg disabled:opacity-30 disabled:cursor-not-allowed hover:opacity-90 transition"
       >
-        {fits ? '显存不足' : `下载·${srcLabel}`}
+        {fits ? t('store.notEnoughVram') : `${t('store.download')}·${srcLabel}`}
       </button>
     )
   }
@@ -163,10 +165,10 @@ function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activ
           </div>
           <div className="text-gray text-sm mt-1">{model.desc}</div>
           <div className="text-xs text-gray/70 mt-2">
-            约 {model.size_gb} GB · 需 ≥{model.min_vram_gb}G 显存
+            {t('store.sizeInfo', { size: model.size_gb, vram: model.min_vram_gb })}
             {model.fits != null && (
               <span className={`ml-2 inline-flex items-center gap-1 ${model.fits ? 'text-green' : 'text-red'}`}>
-                {model.fits ? <><IconCheck size={13} />当前机器可跑</> : <><IconX size={13} />显存不足</>}
+                {model.fits ? <><IconCheck size={13} />{t('store.fitsMachine')}</> : <><IconX size={13} />{t('store.notEnoughVram')}</>}
               </span>
             )}
           </div>
@@ -190,6 +192,7 @@ function ModelCard({ model, targetId, downloadedMap, onDownloaded, source, activ
 }
 
 export default function Store({ targetId }) {
+  const { t } = useI18n()
   const [models, setModels] = useState([])
   const [dynamicModels, setDynamicModels] = useState([])
   const [downloadedMap, setDownloadedMap] = useState({})
@@ -243,7 +246,7 @@ export default function Store({ targetId }) {
 
   async function handleRefresh() {
     setRefreshing(true)
-    setRefreshMsg('正在从 HuggingFace 获取最新模型...')
+    setRefreshMsg(t('store.refreshing'))
     try {
       const res = await fetch('/api/store/refresh')
       const d = await res.json()
@@ -251,11 +254,11 @@ export default function Store({ targetId }) {
       if (d.error) {
         setRefreshMsg(`${d.error}`)
       } else {
-        setRefreshMsg(`已更新，获取到 ${d.models?.length || 0} 个热门模型`)
+        setRefreshMsg(t('store.refreshed', { n: d.models?.length || 0 }))
       }
       setTab('dynamic')
     } catch (e) {
-      setRefreshMsg(`刷新失败: ${e.message}`)
+      setRefreshMsg(t('store.refreshFail', { msg: e.message }))
     } finally {
       setRefreshing(false)
       setTimeout(() => setRefreshMsg(''), 5000)
@@ -281,9 +284,9 @@ export default function Store({ targetId }) {
   return (
     <div>
       <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
-        <h1 className="text-2xl font-bold">模型商店</h1>
+        <h1 className="text-2xl font-bold">{t('store.title')}</h1>
         <div className="flex gap-2 items-center">
-          {[['all', '全部'], ['fits', '可跑的']].map(([v, l]) => (
+          {[['all', t('store.all')], ['fits', t('store.fits')]].map(([v, l]) => (
             <button
               key={v}
               onClick={() => setFilter(v)}
@@ -300,7 +303,7 @@ export default function Store({ targetId }) {
             className="px-3 py-1.5 rounded-lg text-sm border border-purple/50 text-purple hover:bg-purple/10 transition disabled:opacity-50 flex items-center gap-1"
           >
             <span className={refreshing ? 'animate-spin inline-block' : ''}>⟳</span>
-            {refreshing ? '刷新中...' : '刷新最新'}
+            {refreshing ? t('store.refreshingBtn') : t('store.refreshBtn')}
           </button>
         </div>
       </div>
@@ -317,7 +320,7 @@ export default function Store({ targetId }) {
             tab === 'curated' ? 'border-blue bg-blue/20 text-blue' : 'border-gray/40 text-fg/70 hover:bg-gray/10'
           }`}
         >
-          精选推荐
+          {t('store.curated')}
         </button>
         <button
           onClick={() => setTab('dynamic')}
@@ -325,25 +328,25 @@ export default function Store({ targetId }) {
             tab === 'dynamic' ? 'border-purple bg-purple/20 text-purple' : 'border-gray/40 text-fg/70 hover:bg-gray/10'
           }`}
         >
-          热门动态 {dynamicModels.length > 0 && <span className="text-xs opacity-70">({dynamicModels.length})</span>}
+          {t('store.dynamic')} {dynamicModels.length > 0 && <span className="text-xs opacity-70">({dynamicModels.length})</span>}
         </button>
       </div>
 
       {/* 下载源选择器（仅精选模式） */}
       {tab === 'curated' && (
         <div className="flex items-center gap-2 mb-6 flex-wrap">
-          <span className="text-sm text-gray">下载源：</span>
-          {SOURCES.map(([v, l, hint]) => (
+          <span className="text-sm text-gray">{t('store.sourceLabel')}</span>
+          {SOURCES.map(v => (
             <button
               key={v}
               onClick={() => setSource(v)}
               className={`px-3 py-1.5 rounded-lg text-sm border transition ${
                 source === v ? 'border-green bg-green/20 text-green' : 'border-gray/40 text-fg/70 hover:bg-gray/10'
               }`}
-              title={hint}
+              title={t(`store.src.${v}.hint`)}
             >
-              {l}
-              <span className="text-xs opacity-60 ml-1">· {hint}</span>
+              {t(`store.src.${v}`)}
+              <span className="text-xs opacity-60 ml-1">· {t(`store.src.${v}.hint`)}</span>
             </button>
           ))}
         </div>
@@ -351,7 +354,7 @@ export default function Store({ targetId }) {
 
       {tab === 'curated' ? (
         loading ? (
-          <div className="text-gray">加载模型列表...</div>
+          <div className="text-gray">{t('store.loading')}</div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {shown.map(m => (
@@ -372,7 +375,7 @@ export default function Store({ targetId }) {
         <div>
           {dynamicModels.length === 0 ? (
             <div className="text-gray py-8 text-center">
-              暂无动态数据，点击「刷新最新」从 HuggingFace 获取热门模型
+              {t('store.noDynamic')}
             </div>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -393,7 +396,7 @@ export default function Store({ targetId }) {
                       rel="noopener noreferrer"
                       className="ml-3 shrink-0 text-sm px-3 py-1.5 rounded-lg border border-purple/50 text-purple hover:bg-purple/10 transition"
                     >
-                      查看仓库
+                      {t('store.viewRepo')}
                     </a>
                   </div>
                 </div>

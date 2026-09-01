@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef } from 'react'
 import ProgressPanel from '../components/ProgressPanel'
 import { IconAlert, IconStar, IconCheck, IconX, IconBot } from '../components/Icons'
+import { useI18n } from '../i18n/I18nContext'
 
 // ==================== 自动调优 ====================
 
 const GOALS = [
-  ['latency', '端到端体感', '综合首字延迟+生成速度，适合对话'],
-  ['throughput', '解码吞吐', '纯追求生成 t/s 最高'],
-  ['prefill', '长文本预填充', '长输入处理最快'],
+  'latency',
+  'throughput',
+  'prefill',
 ]
 
 const CTX_PRESETS = [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576]
@@ -20,6 +21,7 @@ function fmtCtx(c) {
 
 // 上下文长度选择器：预设快捷值 + 可自定义输入任意 token 数（不固定）
 function CtxPicker({ value, onChange }) {
+  const { t } = useI18n()
   return (
     <div className="mb-4">
       <div className="flex flex-wrap gap-2 mb-2">
@@ -31,11 +33,11 @@ function CtxPicker({ value, onChange }) {
         ))}
       </div>
       <div className="flex items-center gap-2">
-        <span className="text-xs text-gray whitespace-nowrap">自定义</span>
+        <span className="text-xs text-gray whitespace-nowrap">{t('tune.custom')}</span>
         <input type="number" min={1024} step={1024} value={value}
           onChange={e => onChange(Number(e.target.value) || 0)}
           className="flex-1 bg-bg border border-gray/40 rounded-lg px-3 py-1.5 text-fg text-sm" />
-        <span className="text-xs text-gray">tokens</span>
+        <span className="text-xs text-gray">{t('tune.tokens')}</span>
       </div>
     </div>
   )
@@ -52,6 +54,7 @@ const DEFAULT_BASELINE = {
 }
 
 function AutoTune({ targetId }) {
+  const { t } = useI18n()
   const [models, setModels] = useState([])
   const [selected, setSelected] = useState('')
   const [goal, setGoal] = useState('latency')
@@ -129,7 +132,7 @@ function AutoTune({ targetId }) {
       }),
     })
     const d = await res.json()
-    if (!d.ok) { setState('failed'); setError(d.message || '启动失败'); return }
+    if (!d.ok) { setState('failed'); setError(d.message || t('tune.startFail')); return }
     resumePoll(d.job_id)
   }
 
@@ -150,9 +153,9 @@ function AutoTune({ targetId }) {
       })
       const d = await res.json()
       if (d.ok) setSaved(true)
-      else setError(d.message || '保存失败')
+      else setError(d.message || t('tune.saveFail'))
     } catch (e) {
-      setError('保存请求失败')
+      setError(t('tune.saveReqFail'))
     } finally {
       setSaving(false)
     }
@@ -168,82 +171,82 @@ function AutoTune({ targetId }) {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 mb-6">
       <div className="bg-card rounded-xl p-6 border border-gray/30 lg:col-span-3">
         <p className="text-gray text-sm mb-4">
-          在你当前硬件下两阶段搜索最优参数：先定主导因素（投机/缓存/卸载），再收敛微调（batch/ubatch/threads）。
-          每组多次测速取中位数。完整调优约需 15-30 分钟。
+          {t('tune.autoDesc')}
         </p>
 
-        <label className="block text-gray text-sm mb-2">选择模型</label>
+        <label className="block text-gray text-sm mb-2">{t('tune.selectModel')}</label>
         <select value={selected} onChange={e => setSelected(e.target.value)}
           className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 mb-4 text-fg">
-          {models.length === 0 && <option value="">（模型目录为空）</option>}
+          {models.length === 0 && <option value="">{t('tune.emptyDir')}</option>}
           {models.map(m => <option key={m} value={m}>{m}</option>)}
         </select>
 
-        <label className="block text-gray text-sm mb-2">上下文长度（固定约束，AI 调优不会改动它）</label>
+        <label className="block text-gray text-sm mb-2">{t('tune.ctxLabel')}</label>
         <CtxPicker value={ctxSize} onChange={setCtxSize} />
 
-        <label className="block text-gray text-sm mb-2">优化目标</label>
+        <label className="block text-gray text-sm mb-2">{t('tune.goalLabel')}</label>
         <div className="grid grid-cols-3 gap-3 mb-4">
-          {GOALS.map(([v, l, hint]) => (
+          {GOALS.map(v => (
             <button key={v} onClick={() => setGoal(v)}
               className={`p-3 rounded-lg border text-left transition ${goal === v ? 'border-blue bg-blue/20' : 'border-gray/40 hover:bg-gray/10'}`}>
-              <div className={`font-semibold ${goal === v ? 'text-blue' : 'text-fg'}`}>{l}</div>
-              <div className="text-xs text-gray mt-1">{hint}</div>
+              <div className={`font-semibold ${goal === v ? 'text-blue' : 'text-fg'}`}>{t(`tune.goal.${v}`)}</div>
+              <div className="text-xs text-gray mt-1">{t(`tune.goal.${v}.hint`)}</div>
             </button>
           ))}
         </div>
 
         <label className="flex items-center gap-2 text-sm text-gray mb-6 cursor-pointer">
           <input type="checkbox" checked={useBaseline} onChange={e => setUseBaseline(e.target.checked)} className="accent-green" />
-          以我当前配置（draft-mtp / q4_0 / batch4096）作为基线对比
+          {t('tune.baseline')}
         </label>
 
         <button onClick={start} disabled={state === 'running' || !selected}
           className="w-full bg-green text-bg font-bold py-2.5 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition">
-          {state === 'running' ? '调优进行中...' : '开始两阶段调优'}
+          {state === 'running' ? t('tune.running') : t('tune.startAuto')}
         </button>
         {error && <div className="mt-3 text-sm text-red inline-flex items-center gap-1.5"><IconAlert size={14} />{error}</div>}
       </div>
 
       <div className="lg:col-span-2">
-        <ProgressPanel title="测试进度" logs={logs} running={state === 'running'}
-          emptyHint="配置参数后点击「开始两阶段调优」，进度将在此实时显示" />
+        <ProgressPanel title={t('tune.progress')} logs={logs} running={state === 'running'}
+          emptyHint={t('tune.progressHint')} />
       </div>
       </div>
 
       {best && (
         <div className="bg-card rounded-xl p-5 border border-green/40 mb-6">
-          <div className="text-sm font-semibold text-green mb-3 inline-flex items-center gap-1.5"><IconStar size={15} />推荐配置</div>
+          <div className="text-sm font-semibold text-green mb-3 inline-flex items-center gap-1.5"><IconStar size={15} />{t('tune.recommended')}</div>
           <div className="font-mono text-xs text-fg mb-2">{best.label}</div>
           <div className="text-xs text-gray">
-            解码 {best.metrics?.decode} t/s · 预填充 {best.metrics?.prefill} t/s ·
-            首字 {best.metrics?.ttft_ms} ms · GPU {best.metrics?.gpu_util}%
+            {t('tune.metricsLine', { decode: best.metrics?.decode, prefill: best.metrics?.prefill, ttft: best.metrics?.ttft_ms, gpu: best.metrics?.gpu_util })}
           </div>
           {gain != null && baseline && (
             <div className={`mt-3 text-sm font-semibold ${Number(gain) >= 0 ? 'text-green' : 'text-red'}`}>
-              相比你的当前配置（{baseline.metrics?.decode} t/s），解码速度{Number(gain) >= 0 ? '提升' : '下降'} {Math.abs(Number(gain))}%
+              {Number(gain) >= 0
+                ? t('tune.gainUp', { base: baseline.metrics?.decode, pct: Math.abs(Number(gain)) })
+                : t('tune.gainDown', { base: baseline.metrics?.decode, pct: Math.abs(Number(gain)) })}
             </div>
           )}
           <button onClick={saveBest} disabled={saving || saved}
             className={`mt-4 w-full py-2 rounded-lg text-sm font-semibold transition ${saved ? 'bg-green/20 text-green cursor-default' : 'bg-green text-bg hover:opacity-90'}`}>
-            {saved ? '✓ 已保存并应用到该模型部署参数' : (saving ? '保存中...' : '保存并应用')}
+            {saved ? t('tune.saved') : (saving ? t('tune.saving') : t('tune.saveApply'))}
           </button>
-          {saved && <div className="mt-2 text-xs text-gray">含固定上下文长度 ctx={ctxSize}，下次部署该模型自动回填</div>}
+          {saved && <div className="mt-2 text-xs text-gray">{t('tune.savedHint', { ctx: ctxSize })}</div>}
         </div>
       )}
 
       {results.length > 0 && (
         <div className="bg-card rounded-xl p-4 border border-gray/30">
-          <div className="text-sm font-semibold mb-3">全部测试记录</div>
+          <div className="text-sm font-semibold mb-3">{t('tune.allRecords')}</div>
           <table className="w-full text-xs">
             <thead>
               <tr className="text-gray border-b border-gray/30">
-                <th className="text-left py-2 px-2">配置</th>
-                <th className="text-right py-2 px-2">解码</th>
-                <th className="text-right py-2 px-2">预填充</th>
-                <th className="text-right py-2 px-2">首字ms</th>
+                <th className="text-left py-2 px-2">{t('tune.col.config')}</th>
+                <th className="text-right py-2 px-2">{t('tune.col.decode')}</th>
+                <th className="text-right py-2 px-2">{t('tune.col.prefill')}</th>
+                <th className="text-right py-2 px-2">{t('tune.col.ttft')}</th>
                 <th className="text-right py-2 px-2">GPU%</th>
-                <th className="text-center py-2 px-2">推荐</th>
+                <th className="text-center py-2 px-2">{t('tune.col.recommended')}</th>
               </tr>
             </thead>
             <tbody>
@@ -268,6 +271,7 @@ function AutoTune({ targetId }) {
 // ==================== AI 调优 ====================
 
 function AITune({ targetId }) {
+  const { t } = useI18n()
   const [models, setModels] = useState([])
   const [selected, setSelected] = useState('')
   const [ctxSize, setCtxSize] = useState(8192)
@@ -308,9 +312,9 @@ function AITune({ targetId }) {
       })
       const d = await res.json()
       if (d.ok) setSaved(true)
-      else setError(d.message || '保存失败')
+      else setError(d.message || t('tune.saveFail'))
     } catch (e) {
-      setError('保存请求失败')
+      setError(t('tune.saveReqFail'))
     } finally {
       setSaving(false)
     }
@@ -335,13 +339,20 @@ function AITune({ targetId }) {
 
   useEffect(() => {
     if (!targetId) return
-    fetch(`/api/store/downloaded?target_id=${targetId}`)
-      .then(r => r.json())
-      .then(d => {
-        const list = (d.models || []).map(m => m.filename)
-        setModels(list)
+    // 并发拉模型列表与运行状态：若当前有模型正在运行（status.model），
+    // 固定选中它，刷新页面不再回退默认。
+    Promise.all([
+      fetch(`/api/store/downloaded?target_id=${targetId}`).then(r => r.json()),
+      fetch(`/api/deploy/status?target_id=${targetId}`).then(r => r.json()),
+    ]).then(([d, st]) => {
+      const list = (d.models || []).map(m => m.filename)
+      setModels(list)
+      if (st.running && st.model && list.includes(st.model)) {
+        setSelected(st.model)
+      } else {
         setSelected(list[0] || '')
-      })
+      }
+    })
     // 加载已有配置
     fetch('/api/ai-tune/config').then(r => r.json()).then(d => {
       if (d.api_url) { setCfg(d); setCfgSaved(true) }
@@ -397,7 +408,7 @@ function AITune({ targetId }) {
       }),
     })
     const d = await res.json()
-    if (!d.ok) { setState('failed'); setError(d.message || '启动失败'); return }
+    if (!d.ok) { setState('failed'); setError(d.message || t('tune.startFail')); return }
     resumePoll(d.job_id)
   }
 
@@ -408,33 +419,33 @@ function AITune({ targetId }) {
       <div className="lg:col-span-3 space-y-6">
       <div className="bg-card rounded-xl p-6 border border-gray/30">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold">AI 调优配置</h2>
+          <h2 className="text-lg font-bold">{t('tune.aiConfig')}</h2>
           <button onClick={() => setShowConfig(!showConfig)}
             className="text-sm text-blue hover:underline">
-            {showConfig ? '收起' : (cfgSaved ? '修改配置' : '配置 API')}
+            {showConfig ? t('tune.collapse') : (cfgSaved ? t('tune.editConfig') : t('tune.configureApi'))}
           </button>
         </div>
 
         {cfgSaved && !showConfig && (
-          <div className="text-sm text-green mb-2 inline-flex items-center gap-1.5"><IconCheck size={14} />已配置：{cfg.api_url} / {cfg.model_name}</div>
+          <div className="text-sm text-green mb-2 inline-flex items-center gap-1.5"><IconCheck size={14} />{t('tune.configured', { url: cfg.api_url, model: cfg.model_name })}</div>
         )}
 
         {(showConfig || !cfgSaved) && (
           <div className="space-y-3">
             <div>
-              <label className="block text-gray text-xs mb-1">API 地址（OpenAI 兼容）</label>
+              <label className="block text-gray text-xs mb-1">{t('tune.apiUrl')}</label>
               <input value={cfg.api_url} onChange={e => setCfg({ ...cfg, api_url: e.target.value })}
-                placeholder="http://192.168.50.223:8989/v1 或 https://api.deepseek.com/v1"
+                placeholder="http://192.168.50.223:8989/v1 or https://api.deepseek.com/v1"
                 className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 text-sm text-fg" />
             </div>
             <div>
-              <label className="block text-gray text-xs mb-1">API Key（本地服务可留空）</label>
+              <label className="block text-gray text-xs mb-1">{t('tune.apiKey')}</label>
               <input value={cfg.api_key} onChange={e => setCfg({ ...cfg, api_key: e.target.value })}
                 placeholder="sk-..." type="password"
                 className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 text-sm text-fg" />
             </div>
             <div>
-              <label className="block text-gray text-xs mb-1">模型名称</label>
+              <label className="block text-gray text-xs mb-1">{t('tune.modelName')}</label>
               <input value={cfg.model_name} onChange={e => setCfg({ ...cfg, model_name: e.target.value })}
                 placeholder="qwen3-27b / deepseek-chat"
                 className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 text-sm text-fg" />
@@ -442,11 +453,11 @@ function AITune({ targetId }) {
             <div className="flex gap-3">
               <button onClick={testConn} disabled={testing || !cfg.api_url}
                 className="px-4 py-2 text-sm bg-blue/20 text-blue rounded-lg disabled:opacity-40 hover:bg-blue/30 transition">
-                {testing ? '测试中...' : '测试连接'}
+                {testing ? t('tune.testing') : t('tune.testConn')}
               </button>
               <button onClick={saveConfig} disabled={!cfg.api_url}
                 className="px-4 py-2 text-sm bg-green text-bg rounded-lg disabled:opacity-40 hover:opacity-90 transition">
-                保存配置
+                {t('tune.saveConfig')}
               </button>
             </div>
             {testResult && (
@@ -460,66 +471,66 @@ function AITune({ targetId }) {
 
       {/* 调优参数 */}
       <div className="bg-card rounded-xl p-6 border border-gray/30">
-        <label className="block text-gray text-sm mb-2">选择模型</label>
+        <label className="block text-gray text-sm mb-2">{t('tune.selectModel')}</label>
         <select value={selected} onChange={e => setSelected(e.target.value)}
           className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 mb-4 text-fg">
-          {models.length === 0 && <option value="">（模型目录为空）</option>}
+          {models.length === 0 && <option value="">{t('tune.emptyDir')}</option>}
           {models.map(m => <option key={m} value={m}>{m}</option>)}
         </select>
 
-        <label className="block text-gray text-sm mb-2">上下文长度（固定约束，AI 调优不会改动它）</label>
+        <label className="block text-gray text-sm mb-2">{t('tune.ctxLabel')}</label>
         <CtxPicker value={ctxSize} onChange={setCtxSize} />
 
-        <label className="block text-gray text-sm mb-2">优化目标</label>
+        <label className="block text-gray text-sm mb-2">{t('tune.goalLabel')}</label>
         <div className="grid grid-cols-3 gap-3 mb-4">
-          {GOALS.map(([v, l, hint]) => (
+          {GOALS.map(v => (
             <button key={v} onClick={() => setGoal(v)}
               className={`p-3 rounded-lg border text-left transition ${goal === v ? 'border-blue bg-blue/20' : 'border-gray/40 hover:bg-gray/10'}`}>
-              <div className={`font-semibold ${goal === v ? 'text-blue' : 'text-fg'}`}>{l}</div>
-              <div className="text-xs text-gray mt-1">{hint}</div>
+              <div className={`font-semibold ${goal === v ? 'text-blue' : 'text-fg'}`}>{t(`tune.goal.${v}`)}</div>
+              <div className="text-xs text-gray mt-1">{t(`tune.goal.${v}.hint`)}</div>
             </button>
           ))}
         </div>
 
-        <label className="block text-gray text-sm mb-2">场景描述（可选，帮助 AI 理解你的需求）</label>
+        <label className="block text-gray text-sm mb-2">{t('tune.descLabel')}</label>
         <textarea value={userDesc} onChange={e => setUserDesc(e.target.value)}
-          placeholder="例如：主要跑长文本对话，显存比较紧张，希望首字延迟低"
+          placeholder={t('tune.descPlaceholder')}
           rows={2}
           className="w-full bg-bg border border-gray/40 rounded-lg px-3 py-2 text-sm text-fg mb-4 resize-none" />
 
         <button onClick={start} disabled={state === 'running' || !selected || !cfgSaved}
           className="w-full bg-purple text-white font-bold py-2.5 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-90 transition">
-          {state === 'running' ? 'AI 分析中...' : '开始 AI 调优'}
+          {state === 'running' ? t('tune.aiRunning') : t('tune.startAi')}
         </button>
-        {!cfgSaved && <div className="mt-2 text-xs text-gray">请先配置 AI API</div>}
+        {!cfgSaved && <div className="mt-2 text-xs text-gray">{t('tune.needCfg')}</div>}
         {error && <div className="mt-3 text-sm text-red inline-flex items-center gap-1.5"><IconAlert size={14} />{error}</div>}
       </div>
       </div>
 
       {/* 右栏：进度 */}
       <div className="lg:col-span-2">
-        <ProgressPanel title="AI 调优进度" logs={logs} running={state === 'running'}
-          emptyHint="配置 API 并点击「开始 AI 调优」，进度将在此实时显示" />
+        <ProgressPanel title={t('tune.aiProgress')} logs={logs} running={state === 'running'}
+          emptyHint={t('tune.aiProgressHint')} />
       </div>
       </div>
 
       {/* 每轮结果 */}
       {rounds.length > 0 && (
         <div className="bg-card rounded-xl p-4 border border-gray/30 mb-6">
-          <div className="text-sm font-semibold mb-3">迭代记录（{rounds.length} 轮）</div>
+          <div className="text-sm font-semibold mb-3">{t('tune.rounds', { n: rounds.length })}</div>
           <div className="space-y-3">
             {rounds.map((r, i) => (
               <div key={i} className="bg-bg rounded-lg p-3 text-xs">
-                <div className="text-gray mb-1">第 {r.round} 轮 · {r.reasoning?.slice(0, 100)}</div>
+                <div className="text-gray mb-1">{t('tune.round', { n: r.round })} · {r.reasoning?.slice(0, 100)}</div>
                 {r.metrics ? (
                   <div className="flex gap-4 text-fg/80">
-                    <span>解码 <b className="text-green">{r.metrics.decode}</b> t/s</span>
-                    <span>预填充 {r.metrics.prefill} t/s</span>
+                    <span>{t('tune.decode')} <b className="text-green">{r.metrics.decode}</b> t/s</span>
+                    <span>{t('tune.prefill')} {r.metrics.prefill} t/s</span>
                     <span>GPU {r.metrics.gpu_util}%</span>
-                    <span>显存 {r.metrics.gpu_mem_pct}%</span>
+                    <span>{t('tune.vram')} {r.metrics.gpu_mem_pct}%</span>
                   </div>
                 ) : (
-                  <div className="text-red">测试失败</div>
+                  <div className="text-red">{t('tune.testFail')}</div>
                 )}
               </div>
             ))}
@@ -531,7 +542,7 @@ function AITune({ targetId }) {
       {best && (
         <div className="bg-card rounded-xl p-5 border border-purple/40">
           <div className="text-sm font-semibold text-purple mb-3 inline-flex items-center gap-1.5">
-            <IconBot size={15} />AI 最终推荐（第 {best.round} 轮，置信度: {best.confidence}）
+            <IconBot size={15} />{t('tune.finalRec', { n: best.round, conf: best.confidence })}
           </div>
           <div className="bg-bg rounded-lg p-3 font-mono text-xs text-fg mb-3 whitespace-pre-wrap">
             {Object.entries(best.params || {}).map(([k, v]) => (
@@ -541,9 +552,9 @@ function AITune({ targetId }) {
           <div className="text-xs text-gray">{best.reasoning}</div>
           <button onClick={saveBest} disabled={saving || saved}
             className={`mt-4 w-full py-2 rounded-lg text-sm font-semibold transition ${saved ? 'bg-green/20 text-green cursor-default' : 'bg-green text-bg hover:opacity-90'}`}>
-            {saved ? '✓ 已保存并应用到该模型部署参数' : (saving ? '保存中...' : '保存并应用')}
+            {saved ? t('tune.saved') : (saving ? t('tune.saving') : t('tune.saveApply'))}
           </button>
-          {saved && <div className="mt-2 text-xs text-gray">含固定上下文长度 ctx={ctxSize}，下次部署该模型自动回填</div>}
+          {saved && <div className="mt-2 text-xs text-gray">{t('tune.savedHint', { ctx: ctxSize })}</div>}
         </div>
       )}
     </div>
@@ -553,21 +564,22 @@ function AITune({ targetId }) {
 // ==================== 主组件 ====================
 
 export default function Tune({ targetId }) {
+  const { t } = useI18n()
   const [tab, setTab] = useState('auto') // auto | ai
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">智能调优</h1>
+      <h1 className="text-2xl font-bold mb-6">{t('tune.title')}</h1>
 
       {/* Tab 切换 */}
       <div className="flex gap-1 mb-6 bg-card rounded-lg p-1 border border-gray/30 max-w-xs">
         <button onClick={() => setTab('auto')}
           className={`flex-1 py-2 px-4 rounded-md text-sm font-semibold transition ${tab === 'auto' ? 'bg-green text-bg' : 'text-gray hover:text-fg'}`}>
-          自动调优
+          {t('tune.auto')}
         </button>
         <button onClick={() => setTab('ai')}
           className={`flex-1 py-2 px-4 rounded-md text-sm font-semibold transition ${tab === 'ai' ? 'bg-purple text-white' : 'text-gray hover:text-fg'}`}>
-          AI 调优
+          {t('tune.ai')}
         </button>
       </div>
 

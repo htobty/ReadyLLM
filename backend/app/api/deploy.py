@@ -1,5 +1,7 @@
 """部署管理 API（基于用户配置的 Target）"""
 
+import os
+import json
 import shlex
 
 from fastapi import APIRouter, HTTPException, Response
@@ -31,6 +33,43 @@ def _adapter(target_id: str):
         raise HTTPException(status_code=404, detail="目标机器不存在，请先在设置中配置")
     executor = make_executor(target)
     return target, executor, get_adapter(executor, target)
+
+
+# ==================== 运行中模型记录 ====================
+# 记录每个 target 当前正在运行的模型名，供前端刷新后固定选中（不再回退默认）。
+# 持久化到本地 JSON，后端重启不丢失。
+_RUNNING_FILE = os.path.expanduser("~/.model-deploy-assistant/running_models.json")
+
+
+def _load_running() -> dict:
+    try:
+        with open(_RUNNING_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, IOError):
+        return {}
+
+
+def _save_running(data: dict):
+    os.makedirs(os.path.dirname(_RUNNING_FILE), exist_ok=True)
+    with open(_RUNNING_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _record_running(target_id: str, model: str):
+    data = _load_running()
+    data[target_id] = model
+    _save_running(data)
+
+
+def _clear_running(target_id: str):
+    data = _load_running()
+    if target_id in data:
+        del data[target_id]
+        _save_running(data)
+
+
+def _get_running(target_id: str) -> str:
+    return _load_running().get(target_id, "")
 
 
 @router.get("/models")
@@ -182,6 +221,8 @@ def start_model(req: DeployRequest):
             extra += ["--host", "0.0.0.0"]
         params = StartParams(model_path=model_path, extra_args=extra)
         success, msg = engine.start(params)
+        if success:
+            _record_running(req.target_id, req.model)
         return {"success": success, "message": msg, "args": extra}
     finally:
         executor.close()
@@ -193,6 +234,8 @@ def stop_model(target_id: str):
     target, executor, engine = _adapter(target_id)
     try:
         success, msg = engine.stop()
+        if success:
+            _clear_running(target_id)
         return {"success": success, "message": msg}
     finally:
         executor.close()
@@ -200,10 +243,13 @@ def stop_model(target_id: str):
 
 @router.get("/status")
 def get_status(target_id: str):
-    """获取运行状态"""
+    """获取运行状态。model 字段返回当前运行中的模型名（若有），
+    供前端刷新后固定选中正在运行的模型，而非回退到列表第一个。"""
     target, executor, engine = _adapter(target_id)
     try:
-        return {"running": engine.is_running(), "engine": engine.name()}
+        running = engine.is_running()
+        model = _get_running(target_id) if running else ""
+        return {"running": running, "engine": engine.name(), "model": model}
     finally:
         executor.close()
 

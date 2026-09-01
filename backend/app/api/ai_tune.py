@@ -39,10 +39,23 @@ def get_config():
 
 @router.put("/config")
 def put_config(req: AIConfigRequest):
-    """保存 AI 配置"""
+    """保存 AI 配置。
+
+    防御「脱敏回显 + 全量覆盖」陷阱：get_config 返回的 api_key 是脱敏串
+    （如 sk-w***LXcQ），前端会把它回填进表单。若用户只改了 url/model、
+    没动 key 就提交，表单里的脱敏串会覆盖掉文件中的真实 key。
+    因此当提交的 api_key 为空、含脱敏标记 *** 或与当前脱敏值一致时，
+    保留文件里已有的真实 key，绝不用密文覆盖。
+    """
+    existing = ai_tuner.get_config()
+    real_key = existing.get("api_key", "")
+    masked = (real_key[:4] + "***" + real_key[-4:]) if len(real_key) > 8 else "***"
+    new_key = req.api_key
+    if not new_key or new_key == masked or "***" in new_key:
+        new_key = real_key  # 用户没真正改 key，保留原值
     ai_tuner.save_config({
         "api_url": req.api_url,
-        "api_key": req.api_key,
+        "api_key": new_key,
         "model_name": req.model_name,
     })
     return {"ok": True}

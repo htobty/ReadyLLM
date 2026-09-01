@@ -1,7 +1,10 @@
+import { useI18n } from '../i18n/I18nContext'
+
 // 可复用进度面板：标题 + 实时日志列表，用于调优页右侧栏
 // running=true 时显示活动指示；logs 为空时显示等待占位
 
-export default function ProgressPanel({ title = '调优进度', logs = [], running = false, emptyHint = '等待任务启动…' }) {
+export default function ProgressPanel({ title = 'Tuning Progress', logs = [], running = false, emptyHint = 'Waiting for task to start…' }) {
+  const { t } = useI18n()
   return (
     <div className="bg-card rounded-xl p-4 border border-gray/30 lg:sticky lg:top-6">
       <div className="flex items-center gap-2 mb-2">
@@ -9,7 +12,7 @@ export default function ProgressPanel({ title = '调优进度', logs = [], runni
         {running && (
           <span className="flex items-center gap-1 text-xs text-green">
             <span className="w-1.5 h-1.5 rounded-full bg-green animate-pulse" />
-            运行中
+            {t('panel.running')}
           </span>
         )}
       </div>
