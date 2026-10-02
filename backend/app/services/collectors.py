@@ -5,6 +5,7 @@
 """
 
 import json
+import re
 
 from .executor import Executor
 from ..models.target import Target
@@ -68,7 +69,8 @@ def _normalize_gpu_vendor(compat: str) -> str:
 
 
 def _collect_gpu(executor: Executor, target: Target) -> dict:
-    """实时 GPU 采集：NVIDIA 用 nvidia-smi；Windows 上其余厂商走 GPU 性能计数器。
+    """实时 GPU 采集：NVIDIA 用 nvidia-smi；Windows 其余厂商走 GPU 性能计数器；
+    Linux 其余厂商读 sysfs（amdgpu）。
     Apple Silicon 无独立显存且 powermetrics 需 root，返回空。"""
     cmd = ("nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,"
            "temperature.gpu,power.draw --format=csv,noheader,nounits")
@@ -92,6 +94,8 @@ def _collect_gpu(executor: Executor, target: Target) -> dict:
                 pass
     if target.os == "windows":
         return _collect_gpu_windows_generic(executor, target)
+    if target.os == "linux":
+        return _collect_gpu_linux(executor, target)
     return {}
 
 
@@ -142,6 +146,77 @@ def _collect_gpu_windows_generic(executor: Executor, target: Target) -> dict:
             used_gb = round(float(used_raw) / 1024 ** 3, 1)
             out["memory_used_gb"] = used_gb
             out["memory_pct"] = min(round(used_gb / total_gb * 100, 1), 100.0)
+        except ValueError:
+            pass
+    return out
+
+
+def _collect_gpu_linux(executor: Executor, target: Target) -> dict:
+    """Linux 非 NVIDIA 卡（AMD/Intel）的实时采集
+
+    数据都在 sysfs：gpu_busy_percent 是利用率、mem_info_vram_used 是已用显存
+    （amdgpu 提供）。温度与功耗走 hwmon，单位分别是毫摄氏度与微瓦。核显和没绑
+    驱动的卡没有这些文件，读不到就不写该键（界面显示 "--"）——与 Windows 侧
+    口径一致，不用 0 冒充"没读到"。
+    """
+    r = executor.run(
+        "for d in /sys/class/drm/card*/device; do "
+        "[ -e $d/uevent ] || continue; "
+        "id=$(grep -m1 PCI_ID= $d/uevent | cut -d= -f2); "
+        "addr=$(basename $(readlink -f $d) | sed 's/^....//'); "
+        "tot=$(cat $d/mem_info_vram_total 2>/dev/null); "
+        "used=$(cat $d/mem_info_vram_used 2>/dev/null); "
+        "busy=$(cat $d/gpu_busy_percent 2>/dev/null); "
+        "temp=$(cat $d/hwmon/hwmon*/temp1_input 2>/dev/null | head -1); "
+        "power=$(cat $d/hwmon/hwmon*/power1_average 2>/dev/null | head -1); "
+        "if [ -z \"$power\" ]; then "
+        "power=$(cat $d/hwmon/hwmon*/power1_input 2>/dev/null | head -1); fi; "
+        "echo $addr'|'$id'|'${tot:-0}'|'$used'|'$busy'|'$temp'|'$power; "
+        "done", timeout=8)
+    best = None
+    for line in (r.stdout or "").splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3 or not parts[0]:
+            continue
+        vendor = _LINUX_PCI_VENDORS.get((parts[1] or "").lower().split(":")[0])
+        if not vendor:
+            continue
+        try:
+            total_gb = round(float(parts[2] or 0) / 1024 ** 3, 1)
+        except ValueError:
+            total_gb = 0.0
+        if best is None or total_gb > best["total_gb"]:
+            best = {
+                "addr": parts[0], "vendor": vendor, "total_gb": total_gb,
+                "used": parts[3] if len(parts) > 3 else "",
+                "busy": parts[4] if len(parts) > 4 else "",
+                "temp": parts[5] if len(parts) > 5 else "",
+                "power": parts[6] if len(parts) > 6 else "",
+            }
+    if not best:
+        return {}
+    name = _linux_lspci_names(executor).get(best["addr"]) or f'{best["vendor"]} GPU'
+    out = {"name": name, "memory_total_gb": best["total_gb"]}
+    if (best["busy"] or "").strip():
+        try:
+            out["utilization"] = min(round(float(best["busy"]), 1), 100.0)
+        except ValueError:
+            pass
+    if best["total_gb"] > 0 and (best["used"] or "").strip():
+        try:
+            used_gb = round(float(best["used"]) / 1024 ** 3, 1)
+            out["memory_used_gb"] = used_gb
+            out["memory_pct"] = min(round(used_gb / best["total_gb"] * 100, 1), 100.0)
+        except ValueError:
+            pass
+    if (best["temp"] or "").strip():
+        try:
+            out["temperature"] = int(float(best["temp"]) / 1000)  # hwmon 是毫摄氏度
+        except ValueError:
+            pass
+    if (best["power"] or "").strip():
+        try:
+            out["power"] = round(float(best["power"]) / 1_000_000, 1)  # hwmon 是微瓦
         except ValueError:
             pass
     return out
@@ -518,6 +593,104 @@ def _detect_gpu_windows(executor: Executor, target: Target) -> dict:
     return best
 
 
+# ==================== GPU（Linux sysfs） ====================
+
+# PCI 厂商 ID -> vendor 归一化值。
+# 用 PCI ID 而不是名字判定厂商：lspci 在精简发行版上可能没装，
+# 而 sysfs 的 PCI_ID 始终在，两个来源里它才是可靠的那个。
+_LINUX_PCI_VENDORS = {
+    "1002": "amd",
+    "10de": "nvidia",
+    "8086": "intel",
+    "1a03": "other",   # ASPEED，服务器 BMC 显卡
+}
+
+
+def _linux_sysfs_gpus(executor: Executor) -> list:
+    """读 sysfs 列出全部显卡，返回 [{addr, vendor, vram_gb, driver}]
+
+    /sys/class/drm/card*/device 是显卡的 PCI 设备目录：uevent 里 PCI_ID 给出
+    厂商与型号 ID、DRIVER 给出内核驱动名；mem_info_vram_total 是显存字节数
+    （amdgpu 提供，核显与其它驱动没有这个文件，显存记 0 而不是猜一个）。
+    """
+    r = executor.run(
+        "for d in /sys/class/drm/card*/device; do "
+        "[ -e $d/uevent ] || continue; "
+        "id=$(grep -m1 PCI_ID= $d/uevent | cut -d= -f2); "
+        "drv=$(grep -m1 DRIVER= $d/uevent | cut -d= -f2); "
+        "vram=$(cat $d/mem_info_vram_total 2>/dev/null); "
+        "addr=$(basename $(readlink -f $d) | sed 's/^....//'); "
+        "echo $addr'|'$id'|'$vram'|'$drv; "
+        "done", timeout=8)
+    out = []
+    for line in (r.stdout or "").splitlines():
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 3 or not parts[0]:
+            continue
+        vendor = _LINUX_PCI_VENDORS.get((parts[1] or "").lower().split(":")[0])
+        if not vendor:
+            continue
+        try:
+            vram_gb = round(float(parts[2] or 0) / 1024 ** 3, 1)
+        except ValueError:
+            vram_gb = 0.0
+        out.append({
+            "addr": parts[0],
+            "vendor": vendor,
+            "vram_gb": vram_gb,
+            "driver": parts[3] if len(parts) > 3 else "",
+        })
+    return out
+
+
+def _linux_lspci_names(executor: Executor) -> dict:
+    """lspci -nn 输出 -> {PCI 地址: 型号名}；lspci 未安装时返回空 dict
+
+    名称只是给人看的，识别本身不依赖它，所以取不到就退回通用名。
+    """
+    r = executor.run(
+        "lspci -nn 2>/dev/null | grep -iE 'vga|3d controller|display controller'",
+        timeout=8)
+    names = {}
+    for line in (r.stdout or "").splitlines():
+        # "01:00.0 VGA compatible controller [0300]: Advanced Micro Devices,
+        #  Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XTX] [1002:744c]"
+        m = re.match(r"^\S+\s+[^:]*:\s*(.*)$", line)
+        if not m:
+            continue
+        addr = line.split(" ", 1)[0].strip()
+        body = re.sub(r"\s*\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]\s*$", "", m.group(1)).strip()
+        # 取最后一个方括号里的型号，比整串厂商名可读：
+        # "Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XTX]"
+        #   -> "Radeon RX 7900 XTX"
+        brackets = re.findall(r"\[([^\]]+)\]", body)
+        if brackets:
+            body = brackets[-1]
+        names[addr] = body
+    return names
+
+
+def _detect_gpu_linux(executor: Executor, target: Target) -> dict:
+    """Linux 上非 NVIDIA 显卡（AMD/Intel）的静态识别
+
+    nvidia-smi 只覆盖 NVIDIA，Linux 上没有等价的通用命令行工具，所以改读
+    sysfs。多显卡（核显 + 独显）时取显存最大的一块，与 Windows 侧口径一致。
+    """
+    gpus = _linux_sysfs_gpus(executor)
+    if not gpus:
+        return None
+    best = max(gpus, key=lambda g: g["vram_gb"])
+    name = _linux_lspci_names(executor).get(best["addr"]) or f'{best["vendor"]} GPU'
+    return {
+        "name": name,
+        "total_memory_gb": best["vram_gb"],
+        # 剩余显存 sysfs 不提供，与 Windows 非 N 卡一样留 0，不编数字
+        "free_memory_gb": 0,
+        "driver": best["driver"],
+        "vendor": best["vendor"],
+    }
+
+
 def _detect_gpu_static(executor: Executor, target: Target) -> dict:
     # NVIDIA 跨平台
     result = executor.run(
@@ -532,6 +705,11 @@ def _detect_gpu_static(executor: Executor, target: Target) -> dict:
                     "total_memory_gb": round(float(parts[1]) / 1024, 1),
                     "free_memory_gb": round(float(parts[2]) / 1024, 1),
                     "driver": parts[3],
+                    # nvidia-smi 只可能来自 NVIDIA，厂商是确定的。
+                    # 这个字段不只是给界面看的：llama.cpp 后端选择（installer.
+                    # resolve_backend 经 detect_gpu_vendor）也读它，缺了就会把
+                    # N 卡机器判成 CPU 后端。
+                    "vendor": "nvidia",
                 }
             except ValueError:
                 pass
@@ -552,7 +730,14 @@ def _detect_gpu_static(executor: Executor, target: Target) -> dict:
         name = kv.get("NAME", "").strip()
         if name:
             return {"name": name, "total_memory_gb": 0, "free_memory_gb": 0,
-                    "driver": "Apple", "unified": True}
+                    "driver": "Apple", "unified": True, "vendor": "apple"}
+
+    # Linux 上的 AMD/Intel 卡：同样没有 nvidia-smi，改读 sysfs
+    if target.os == "linux":
+        gpu = _detect_gpu_linux(executor, target)
+        if gpu:
+            return gpu
+
     return None
 
 
@@ -585,6 +770,19 @@ def _detect_disk(executor: Executor, target: Target) -> dict:
             }
         except ValueError:
             return {}
+
+
+def detect_gpu_vendor(executor: Executor, target: Target) -> str:
+    """只取显卡厂商（nvidia / amd / intel / other），供选择 llama.cpp 构建用
+
+    比 detect_hardware 轻：不测 CPU / 内存 / 磁盘。取不到时返回空串，
+    调用方按「识别不到」处理。
+    """
+    try:
+        gpu = _detect_gpu_static(executor, target) or {}
+        return (gpu.get("vendor") or "").strip().lower()
+    except Exception:
+        return ""
 
 
 def detect_hardware(executor: Executor, target: Target) -> dict:

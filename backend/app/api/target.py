@@ -44,6 +44,8 @@ class TargetRequest(BaseModel):
     engine_path: str = ""
     models_dir: str = ""
     service_port: int = 8080
+    # llama.cpp 的 GPU 后端：auto / cuda / rocm / vulkan / cpu（auto 按显卡厂商与系统推断）
+    llama_backend: str = "auto"
     id: Optional[str] = None
     name: str = "本机"
 

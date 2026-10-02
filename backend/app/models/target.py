@@ -43,6 +43,11 @@ class Target:
     # 模型目录（存放 .gguf 的目录）
     models_dir: str = ""
 
+    # llama.cpp 的 GPU 后端：auto / cuda / rocm / vulkan / cpu
+    # auto 由安装与部署时按显卡厂商与系统推断（NVIDIA->cuda，AMD->vulkan，
+    # Intel->vulkan，Apple->metal，识别不到->cpu）；显式指定则优先生效
+    llama_backend: str = "auto"
+
     # 推理服务监听端口
     service_port: int = 8080
 
@@ -99,15 +104,47 @@ def get_target(target_id: str) -> Optional[Target]:
     return None
 
 
+def target_identity(t: Target) -> tuple:
+    """判定「同一台机器」的身份键
+
+    远程机器看 主机 + SSH 端口 + 用户 + 名称，本机看名称。用于在请求没带 id
+    （或带的 id 对不上）时识别出同一台机器，避免被反复追加成多条。
+
+    名称参与判定：同一台机器上可以并存多套配置（比如一台台式机分别跑推理和
+    ComfyUI），只有同名才算同一条，免得把用户有意拆开的配置并掉。
+    """
+    name = (t.name or "").strip()
+    if t.conn_type == "ssh":
+        return (
+            "ssh",
+            (t.host or "").strip().lower(),
+            str(t.port or 22).strip(),
+            (t.user or "").strip(),
+            name,
+        )
+    return ("local", name)
+
+
 def upsert_target(target: Target) -> list[Target]:
-    """新增或更新一个目标机器"""
+    """新增或更新一个目标机器
+
+    先按 id 精确匹配；没命中再按身份键匹配同一台机器，命中则更新并沿用原有
+    id（前端仍能以这个 id 引用它），都不命中才追加新条目。
+    """
     targets = load_targets()
     for i, t in enumerate(targets):
         if t.id == target.id:
             targets[i] = target
             break
     else:
-        targets.append(target)
+        key = target_identity(target)
+        for i, t in enumerate(targets):
+            if target_identity(t) == key:
+                target.id = t.id
+                targets[i] = target
+                break
+        else:
+            targets.append(target)
     save_targets(targets)
     return targets
 

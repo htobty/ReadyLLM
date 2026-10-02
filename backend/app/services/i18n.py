@@ -102,6 +102,46 @@ MESSAGES = {
         "zh": "解压安装包",
         "en": "Extracting package",
     },
+    "install.backend_selected": {
+        "zh": "llama.cpp 后端: {backend}",
+        "en": "llama.cpp backend: {backend}",
+    },
+    "install.release_tag": {
+        "zh": "选用预编译版本: {tag}",
+        "en": "Using prebuilt release: {tag}",
+    },
+    "install.package_name": {
+        "zh": "安装包: {name}",
+        "en": "Package: {name}",
+    },
+    "install.download_cudart": {
+        "zh": "下载 CUDA 运行时包（cudart）",
+        "en": "Downloading the CUDA runtime package (cudart)",
+    },
+    "install.unzip_cudart": {
+        "zh": "解压 CUDA 运行时到引擎目录",
+        "en": "Extracting the CUDA runtime next to the engine",
+    },
+    "install.prebuilt_failed": {
+        "zh": "预编译包不可用，改用源码编译：{err}",
+        "en": "Prebuilt package unavailable, falling back to a source build: {err}",
+    },
+    "install.prebuilt_missing": {
+        "zh": "预编译包内未找到 llama-server，改用源码编译",
+        "en": "llama-server is missing from the prebuilt package, falling back to a source build",
+    },
+    "install.arch_no_prebuilt": {
+        "zh": "该架构（{arch}）没有官方预编译包，改用源码编译",
+        "en": "No official prebuilt package for {arch}, falling back to a source build",
+    },
+    "install.compile_fallback": {
+        "zh": "回退为源码编译 llama.cpp",
+        "en": "Falling back to building llama.cpp from source",
+    },
+    "install.compile_llama_gpu": {
+        "zh": "编译 llama.cpp（{backend} 后端，可能较久）",
+        "en": "Building llama.cpp ({backend} backend, this can take a while)",
+    },
     "install.engine_path": {
         "zh": "引擎路径: {path}",
         "en": "Engine path: {path}",
@@ -184,9 +224,17 @@ MESSAGES = {
     },
 
     # ==================== 安装：错误 ====================
+    "install.err.release_api": {
+        "zh": "查询官方 release 列表失败：{err}",
+        "en": "Could not query the official release list: {err}",
+    },
+    "install.err.step_failed": {
+        "zh": "步骤失败：{desc}（{err}）",
+        "en": "Step failed: {desc} ({err})",
+    },
     "install.err.no_download_url": {
-        "zh": "无法获取预编译包下载地址（请检查目标机网络或 GitHub 可访问性）",
-        "en": "Could not resolve the prebuilt package URL (check the target machine's network access to GitHub)",
+        "zh": "没有找到适用于 {backend} 后端的官方预编译包（请检查控制端到 GitHub 的网络，或在设置里改选其他后端）",
+        "en": "No official prebuilt package found for the {backend} backend (check the controller's network access to GitHub, or pick another backend in settings)",
     },
     "install.err.no_llama_exe": {
         "zh": "解压后未找到 llama-server.exe",

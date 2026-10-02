@@ -16,6 +16,8 @@ const EMPTY = {
   engine_path: '',
   models_dir: '',
   service_port: 8080,
+  // llama.cpp 的 GPU 后端：auto 按显卡自动选（NVIDIA→CUDA、AMD/Intel→Vulkan）
+  llama_backend: 'auto',
 }
 
 const OS_OPTIONS = [
@@ -125,6 +127,18 @@ export default function Settings({ targets, onSaved, onChanged }) {
     setForm(f => ({ ...f, conn_type: v, os: v === 'local' && localOs ? localOs : f.os }))
   }
 
+  // 选中一台已保存的机器：整份回填表单并带上 id，保存时走更新而不是新增
+  function edit(tg) {
+    setForm({ ...EMPTY, ...tg, password: '', id: tg.id })
+    setTestResult(null)
+  }
+
+  // 清空表单，回到「新增一台机器」
+  function reset() {
+    setForm({ ...EMPTY })
+    setTestResult(null)
+  }
+
   async function test() {
     setTesting(true)
     setTestResult(null)
@@ -150,6 +164,8 @@ export default function Settings({ targets, onSaved, onChanged }) {
     })
     const d = await res.json()
     if (d.ok) {
+      // 记住后端返回的 id：新增之后再点保存，走的是更新同一台机器
+      if (d.id) setForm(f => ({ ...f, id: d.id }))
       if (onSaved) onSaved(d.targets)
       setTestResult(null)
     }
@@ -161,6 +177,41 @@ export default function Settings({ targets, onSaved, onChanged }) {
       <p className="text-gray text-sm mb-6">
         {t('settings.subtitle')}
       </p>
+
+      {/* 已保存的机器：点一下整份回填表单（带上 id），改完保存是更新而不是新增 */}
+      {targets?.length > 0 && (
+        <div className="mb-4">
+          <div className="text-sm text-gray mb-2">{t('settings.savedTargets')}</div>
+          <div className="flex flex-wrap gap-2">
+            {targets.map(tg => (
+              <button
+                key={tg.id}
+                onClick={() => edit(tg)}
+                className={`px-3 py-1.5 rounded-lg border text-sm transition ${
+                  form.id === tg.id
+                    ? 'border-blue bg-blue/20 text-blue'
+                    : 'border-gray/40 text-fg/70 hover:border-blue/60'
+                }`}
+              >
+                {tg.name || t('settings.defaultName')}
+                <span className="ml-2 text-xs text-gray">
+                  {tg.conn_type === 'ssh' ? tg.host : t('settings.local')}
+                </span>
+              </button>
+            ))}
+            <button
+              onClick={reset}
+              className={`px-3 py-1.5 rounded-lg border border-dashed text-sm transition ${
+                form.id
+                  ? 'border-gray/40 text-gray hover:text-fg'
+                  : 'border-blue bg-blue/20 text-blue'
+              }`}
+            >
+              + {t('settings.newTarget')}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="bg-card rounded-xl p-6 border border-gray/30">
         <Field label={t('settings.name')}>
@@ -229,6 +280,23 @@ export default function Settings({ targets, onSaved, onChanged }) {
             </div>
           )}
         </Field>
+
+        {/* llama.cpp 后端：决定一键安装下载哪个官方构建。macOS 只有 Metal，不显示 */}
+        {form.engine_type === 'llama_cpp' && form.os !== 'macos' && (
+          <Field label={t('settings.llamaBackend')} hint={t('settings.llamaBackendHint')}>
+            <SegButtons
+              value={form.llama_backend}
+              options={[
+                ['auto', t('settings.backendAuto')],
+                ['cuda', 'CUDA'],
+                ['rocm', 'ROCm'],
+                ['vulkan', 'Vulkan'],
+                ['cpu', 'CPU'],
+              ]}
+              onChange={v => set('llama_backend', v)}
+            />
+          </Field>
+        )}
 
         {engineOsUnsupported && (
           <div className="mb-4 p-3 rounded-lg bg-yellow/10 text-yellow text-sm border border-yellow/30 flex items-start gap-2">
