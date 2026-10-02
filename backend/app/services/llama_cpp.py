@@ -11,6 +11,7 @@ from .engine_adapter import EngineAdapter, StartParams
 from .executor import Executor
 from .collectors import path_join
 from ..models.target import Target
+from .i18n import L
 
 # llama-server 默认推荐参数（通用，不含任何特定机器/模型路径）
 DEFAULT_ARGS = [
@@ -66,7 +67,7 @@ class LlamaCppAdapter(EngineAdapter):
         )
         result = self.executor.run(write_cmd, timeout=15)
         if not result.ok:
-            return False, f"写入启动脚本失败: {result.stdout} {result.stderr}"
+            return False, L("engine.write_script_fail", err=f"{result.stdout} {result.stderr}")
 
         run_cmd = (
             'schtasks /create /tn LlamaServer /tr "%s" /sc once /st 00:00 /f '
@@ -74,8 +75,8 @@ class LlamaCppAdapter(EngineAdapter):
         )
         result = self.executor.run(run_cmd, timeout=15)
         if not result.ok:
-            return False, f"启动失败: {result.stdout} {result.stderr}"
-        return True, "启动命令已发送"
+            return False, L("engine.start_fail", err=f"{result.stdout} {result.stderr}")
+        return True, L("engine.start_sent")
 
     def _start_linux(self, exe: str, model_path: str, args_str: str) -> tuple[bool, str]:
         cmd = (
@@ -84,8 +85,8 @@ class LlamaCppAdapter(EngineAdapter):
         )
         result = self.executor.run(cmd, timeout=15)
         if not result.ok:
-            return False, f"启动失败: {result.stdout} {result.stderr}"
-        return True, "启动命令已发送"
+            return False, L("engine.start_fail", err=f"{result.stdout} {result.stderr}")
+        return True, L("engine.start_sent")
 
     def stop(self) -> tuple[bool, str]:
         if self.target.os == "windows":
@@ -93,8 +94,8 @@ class LlamaCppAdapter(EngineAdapter):
         else:
             result = self.executor.run("pkill -f llama-server", timeout=10)
         if result.ok:
-            return True, "服务已停止"
-        return False, f"停止结果: {result.stdout} {result.stderr}"
+            return True, L("engine.stop_ok")
+        return False, L("engine.stop_result", err=f"{result.stdout} {result.stderr}")
 
     def is_running(self) -> bool:
         if self.target.os == "windows":

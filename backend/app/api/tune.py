@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict
 
 from ..services import tuner, tune_history
+from ..services.i18n import L
 
 router = APIRouter()
 
@@ -49,7 +50,7 @@ def active(target_id: str):
 def options():
     """返回可选的优化目标与基线参数取值范围，供前端渲染"""
     return {
-        "goals": [{"value": k, "label": v} for k, v in tuner.GOAL_LABELS.items()],
+        "goals": [{"value": k, "label": tuner.goal_label(k)} for k in tuner.GOAL_KEYS],
         "spec_options": tuner.SPEC_OPTIONS,
         "cache_options": tuner.CACHE_OPTIONS,
         "ngl_options": tuner.NGL_OPTIONS,
@@ -70,9 +71,9 @@ def save(req: SaveTuneRequest):
     """把某次调优的最优参数（含固定 ctx_size）保存到该模型，
     作为部署页 default-args 的回填来源。用户在结果界面点「保存并应用」时调用。"""
     if not req.params:
-        return {"ok": False, "message": "无参数可保存"}
+        return {"ok": False, "message": L("tune.save.empty")}
     tune_history.save_latest(
         req.target_id, req.model, req.ctx_size, req.params,
         source="tuner", score=req.score,
     )
-    return {"ok": True, "message": f"已保存到 {req.model} 的部署参数（含 ctx={req.ctx_size}）"}
+    return {"ok": True, "message": L("tune.save.ok", model=req.model, ctx=req.ctx_size)}

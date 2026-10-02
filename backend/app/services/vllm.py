@@ -13,6 +13,7 @@ vLLM 是高吞吐推理引擎，通过 `vllm serve <model>` 启动 OpenAI 兼容
 from .engine_adapter import EngineAdapter, StartParams
 from .executor import Executor
 from ..models.target import Target
+from .i18n import L
 
 # vLLM 默认推荐启动参数（通用，不含任何特定机器/模型）
 DEFAULT_ARGS = [
@@ -20,10 +21,7 @@ DEFAULT_ARGS = [
     "--host", "0.0.0.0",
 ]
 
-WSL2_HINT = (
-    "vLLM 不支持 Windows 原生运行。请在 WSL2 (Ubuntu) 中安装并运行 vLLM，"
-    "或将目标机引擎类型改为 llama.cpp。"
-)
+# Windows 拦截提示：文案走 i18n（key: detect.vllm_windows），按界面语言在调用时取
 
 
 class VLLMAdapter(EngineAdapter):
@@ -56,7 +54,7 @@ class VLLMAdapter(EngineAdapter):
 
     def start(self, params: StartParams) -> tuple[bool, str]:
         if self.target.os == "windows":
-            return False, WSL2_HINT
+            return False, L("detect.vllm_windows")
 
         args = list(params.extra_args) if params.extra_args else list(DEFAULT_ARGS)
         # 注入端口（vllm serve 用 --port）
@@ -71,16 +69,16 @@ class VLLMAdapter(EngineAdapter):
         run_cmd = f"nohup {cmd} > /tmp/vllm_server.log 2>&1 &"
         result = self.executor.run(run_cmd, timeout=20)
         if not result.ok:
-            return False, f"启动失败: {result.stdout} {result.stderr}"
-        return True, "vLLM 启动命令已发送（首次加载模型需下载权重，请耐心等待）"
+            return False, L("engine.start_fail", err=f"{result.stdout} {result.stderr}")
+        return True, L("engine.start_sent_weights")
 
     def stop(self) -> tuple[bool, str]:
         if self.target.os == "windows":
-            return False, WSL2_HINT
+            return False, L("detect.vllm_windows")
         result = self.executor.run("pkill -f 'vllm serve'", timeout=10)
         if result.ok:
-            return True, "vLLM 服务已停止"
-        return False, f"停止结果: {result.stdout} {result.stderr}"
+            return True, L("engine.stop_ok")
+        return False, L("engine.stop_result", err=f"{result.stdout} {result.stderr}")
 
     def is_running(self) -> bool:
         if self.target.os == "windows":

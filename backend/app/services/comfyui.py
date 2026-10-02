@@ -25,6 +25,7 @@ from typing import Optional
 from .engine_adapter import EngineAdapter, StartParams
 from .executor import Executor
 from ..models.target import Target
+from .i18n import L
 
 
 def _path_join(target: Target, base: str, name: str) -> str:
@@ -87,7 +88,7 @@ class ComfyUIAdapter(EngineAdapter):
         port = _comfy_port(self.target)
         d = self._comfy_dir()
         if not d:
-            return False, "未配置 ComfyUI 安装目录（engine_path 应指向 ComfyUI 根目录）"
+            return False, L("detect.no_comfyui_dir")
         main_py = _path_join(self.target, d, "main.py")
         # --listen 0.0.0.0 便于本机端口转发访问；--port 指定端口
         # --disable-async-offload --disable-mmap：绕开 comfy_aimdo 异步权重 I/O
@@ -128,23 +129,23 @@ class ComfyUIAdapter(EngineAdapter):
         )
         result = self.executor.run(write_cmd, timeout=15)
         if not result.ok:
-            return False, f"写入启动脚本失败: {result.stdout} {result.stderr}"
+            return False, L("engine.write_script_fail", err=f"{result.stdout} {result.stderr}")
         run_cmd = (
             'schtasks /create /tn ComfyUI /tr "%s" /sc once /st 00:00 /f '
             '&& schtasks /run /tn ComfyUI' % bat_path
         )
         result = self.executor.run(run_cmd, timeout=15)
         if not result.ok:
-            return False, f"启动失败: {result.stdout} {result.stderr}"
-        return True, "ComfyUI 启动命令已发送（首次启动需加载依赖，请耐心等待）"
+            return False, L("engine.start_fail", err=f"{result.stdout} {result.stderr}")
+        return True, L("engine.start_sent_comfyui")
 
     def _start_linux(self, d: str, run_args: str) -> tuple:
         py = self._python_cmd()
         cmd = f'cd "{d}" && nohup {py} {run_args} > /tmp/comfyui.log 2>&1 &'
         result = self.executor.run(cmd, timeout=20)
         if not result.ok:
-            return False, f"启动失败: {result.stdout} {result.stderr}"
-        return True, "ComfyUI 启动命令已发送"
+            return False, L("engine.start_fail", err=f"{result.stdout} {result.stderr}")
+        return True, L("engine.start_sent")
 
     def stop(self) -> tuple:
         if self.target.os == "windows":
@@ -155,8 +156,8 @@ class ComfyUIAdapter(EngineAdapter):
         else:
             result = self.executor.run("pkill -f 'ComfyUI/main.py'", timeout=10)
         if result.ok:
-            return True, "ComfyUI 服务已停止"
-        return False, f"停止结果: {result.stdout} {result.stderr}"
+            return True, L("engine.stop_ok")
+        return False, L("engine.stop_result", err=f"{result.stdout} {result.stderr}")
 
     def is_running(self) -> bool:
         # 健康检查：ComfyUI 提供 /system_stats，能连通即视为运行中
@@ -198,7 +199,7 @@ class ComfyUIAdapter(EngineAdapter):
         body = json.dumps(payload, ensure_ascii=False)
         tmp = self._remote_tmp(f"comfy_prompt_{cid}.json")
         if not self.executor.write_file(body, tmp):
-            return False, "写入 workflow 临时文件失败"
+            return False, L("comfyui.workflow_write_fail")
 
         url = f"{self._base_url()}/prompt"
         if self.target.os == "windows":
@@ -210,12 +211,12 @@ class ComfyUIAdapter(EngineAdapter):
         try:
             data = json.loads(out)
         except (ValueError, json.JSONDecodeError):
-            return False, f"提交失败，响应无法解析: {out[:300]}"
+            return False, L("comfyui.submit_unparsable", err=out[:300])
         if "prompt_id" in data:
             return True, data["prompt_id"]
         # ComfyUI 校验失败会返回 error 详情
         err = data.get("error") or data
-        return False, f"workflow 被拒绝: {json.dumps(err, ensure_ascii=False)[:400]}"
+        return False, L("comfyui.workflow_rejected", err=json.dumps(err, ensure_ascii=False)[:400])
 
     def get_history(self, prompt_id: str) -> Optional[dict]:
         """查询任务历史；任务完成后 outputs 里含产物（视频/图片）文件信息。"""
@@ -246,7 +247,7 @@ class ComfyUIAdapter(EngineAdapter):
                             info.get("exception_message", "").strip(),
                             info.get("node_type", ""))
                         break
-                return {"state": "error", "message": msg or "ComfyUI 执行报错"}
+                return {"state": "error", "message": msg or L("comfyui.exec_error")}
             outputs = entry.get("outputs", {})
             return {"state": "completed", "outputs": outputs}
         q = self.get_queue()

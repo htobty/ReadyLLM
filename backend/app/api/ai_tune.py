@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict
 
 from ..services import ai_tuner, tune_history
+from ..services.i18n import L
 
 router = APIRouter()
 
@@ -108,9 +109,9 @@ def save(req: SaveTuneRequest):
     """把 AI 调优的最终推荐参数（含固定 ctx_size）保存到该模型，
     作为部署页 default-args 的回填来源。用户在结果界面点「保存并应用」时调用。"""
     if not req.params:
-        return {"ok": False, "message": "无参数可保存"}
+        return {"ok": False, "message": L("tune.save.empty")}
     tune_history.save_latest(
         req.target_id, req.model, req.ctx_size, req.params,
         source="ai_tuner", score=req.score,
     )
-    return {"ok": True, "message": f"已保存到 {req.model} 的部署参数（含 ctx={req.ctx_size}）"}
+    return {"ok": True, "message": L("tune.save.ok", model=req.model, ctx=req.ctx_size)}

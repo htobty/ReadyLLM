@@ -26,6 +26,7 @@ from ..models.target import (
 from ..services.executor import make_executor
 from ..services.collectors import detect_hardware
 from ..services import installer
+from ..services.i18n import L, get_lang
 
 router = APIRouter()
 
@@ -84,11 +85,11 @@ def test_connection(req: TargetRequest):
         probe = "echo OK" if target.os != "windows" else 'echo OK'
         r = executor.run(probe, timeout=10)
         if not r.ok and "OK" not in r.stdout:
-            return {"ok": False, "message": f"连接失败: {r.stderr or r.stdout}"}
+            return {"ok": False, "message": L("target.conn_fail", err=r.stderr or r.stdout)}
         hw = detect_hardware(executor, target)
-        return {"ok": True, "message": "连接成功", "hardware": hw}
+        return {"ok": True, "message": L("target.conn_ok"), "hardware": hw}
     except Exception as e:
-        return {"ok": False, "message": f"连接异常: {e}"}
+        return {"ok": False, "message": L("target.conn_error", err=e)}
     finally:
         executor.close()
 
@@ -99,7 +100,7 @@ def check_engine(target_id: str):
     """检测目标机是否已安装推理引擎"""
     target = get_target(target_id)
     if not target:
-        return {"installed": False, "reason": "目标机器不存在"}
+        return {"installed": False, "reason": L("target.not_found")}
     executor = make_executor(target)
     try:
         return installer.detect_engine(executor, target)
@@ -116,8 +117,8 @@ def install_engine(req: InstallRequest):
     """启动一键安装推理引擎（后台任务，返回 job_id 供轮询）"""
     target = get_target(req.target_id)
     if not target:
-        return {"ok": False, "message": "目标机器不存在"}
-    job_id = installer.start_install(target)
+        return {"ok": False, "message": L("target.not_found")}
+    job_id = installer.start_install(target, get_lang())
     return {"ok": True, "job_id": job_id}
 
 

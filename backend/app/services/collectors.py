@@ -37,8 +37,39 @@ def _ps(body: str) -> str:
 
 # ==================== GPU ====================
 
+# 显示适配器注册表类（{4d36e968-...}）下每个实例的 HardwareInformation.qwMemorySize
+# 是 64 位显存大小；Win32_VideoController.AdapterRAM 是 uint32，显存 >4GB 会回绕，
+# 所以显存一律优先读注册表，AdapterRAM 只作兜底。
+_WIN_DISPLAY_CLASS = ("HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
+                      "{4d36e968-e325-11ce-bfc1-08002be10318}")
+
+
+def _parse_mem_bytes(raw) -> float:
+    """显存字节数 -> GB；不合理（回绕、非数字）的值返回 0"""
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if val <= 0 or val > 1024 ** 4:   # 上限 1TB，超出必是 uint32 回绕
+        return 0.0
+    return round(val / 1024 ** 3, 1)
+
+
+def _normalize_gpu_vendor(compat: str) -> str:
+    """WMI AdapterCompatibility -> amd / intel / nvidia / other"""
+    c = (compat or "").lower()
+    if "advanced micro devices" in c or "amd" in c or "ati " in c:
+        return "amd"
+    if "intel" in c:
+        return "intel"
+    if "nvidia" in c:
+        return "nvidia"
+    return "other"
+
+
 def _collect_gpu(executor: Executor, target: Target) -> dict:
-    """实时 GPU 采集：NVIDIA 用 nvidia-smi，Apple Silicon 用 powermetrics 不可行，返回空"""
+    """实时 GPU 采集：NVIDIA 用 nvidia-smi；Windows 上其余厂商走 GPU 性能计数器。
+    Apple Silicon 无独立显存且 powermetrics 需 root，返回空。"""
     cmd = ("nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total,"
            "temperature.gpu,power.draw --format=csv,noheader,nounits")
     result = executor.run(cmd, timeout=8)
@@ -59,7 +90,61 @@ def _collect_gpu(executor: Executor, target: Target) -> dict:
                 }
             except ValueError:
                 pass
+    if target.os == "windows":
+        return _collect_gpu_windows_generic(executor, target)
     return {}
+
+
+def _collect_gpu_windows_generic(executor: Executor, target: Target) -> dict:
+    """Windows 非 NVIDIA 显卡（AMD/Intel）的实时采集。
+
+    nvidia-smi 只覆盖 NVIDIA，其余厂商没有等价的命令行工具，改走 Windows
+    性能计数器（GPU Engine / GPU Adapter Memory，Win10 1809+ 提供）。走 WMI 类
+    而不是 Get-Counter 的路径字符串：类名与属性名不随系统语言本地化，中文系统
+    同样可用。温度与功耗没有通用接口，无从获取，只能留空。
+    """
+    result = executor.run(_ps(
+        "$a=Get-CimInstance Win32_VideoController | "
+        "Where-Object { $_.Name -notmatch 'Basic Display|Remote Display|Virtual' } | "
+        "Sort-Object AdapterRAM -Descending | Select-Object -First 1; "
+        "Write-Output ('NAME=' + $a.Name); "
+        f"$m=(Get-ChildItem '{_WIN_DISPLAY_CLASS}' | "
+        "ForEach-Object { (Get-ItemProperty $_.PSPath -Name "
+        "'HardwareInformation.qwMemorySize' -ErrorAction SilentlyContinue)"
+        ".'HardwareInformation.qwMemorySize' } | Measure-Object -Maximum).Maximum; "
+        "if (-not $m) { $m=$a.AdapterRAM }; "
+        "Write-Output ('TOTAL=' + $m); "
+        "$u=Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine "
+        "-ErrorAction SilentlyContinue | Measure-Object UtilizationPercentage -Sum; "
+        "Write-Output ('UTIL=' + $u.Sum); "
+        "$d=Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory "
+        "-ErrorAction SilentlyContinue | Measure-Object DedicatedUsage -Sum; "
+        "Write-Output ('MEMUSED=' + $d.Sum)"
+    ), timeout=20)
+    kv = _parse_kv_lines(result.stdout)
+    name = kv.get("NAME", "").strip()
+    if not name:
+        return {}
+    total_gb = _parse_mem_bytes(kv.get("TOTAL", ""))
+    out = {"name": name, "memory_total_gb": total_gb}
+    # 计数器类不可用时这些项会读出空值：宁可不写（界面显示 "--"），
+    # 也不要填 0 —— 0% 是有含义的值（GPU 真空闲），与"没读到"必须区分开
+    util_raw = (kv.get("UTIL") or "").strip()
+    if util_raw:
+        try:
+            # 各引擎利用率之和是近似值（与任务管理器口径接近），封顶 100
+            out["utilization"] = min(round(float(util_raw), 1), 100.0)
+        except ValueError:
+            pass
+    used_raw = (kv.get("MEMUSED") or "").strip()
+    if total_gb > 0 and used_raw:
+        try:
+            used_gb = round(float(used_raw) / 1024 ** 3, 1)
+            out["memory_used_gb"] = used_gb
+            out["memory_pct"] = min(round(used_gb / total_gb * 100, 1), 100.0)
+        except ValueError:
+            pass
+    return out
 
 
 # ==================== CPU / 内存 ====================
@@ -391,6 +476,48 @@ def _detect_memory_static(executor: Executor, target: Target) -> dict:
         return {"total_gb": round(total / 1024**3, 1), "free_gb": round(avail / 1024**3, 1)}
 
 
+def _detect_gpu_windows(executor: Executor, target: Target) -> dict:
+    """Windows 上非 NVIDIA 显卡（AMD/Intel）的静态识别。
+
+    nvidia-smi 只覆盖 NVIDIA，其余厂商没有等价的命令行工具，改用 WMI 列显示
+    适配器取名称与驱动版本。显存优先读注册表 HardwareInformation.qwMemorySize
+    （64 位），因为 Win32_VideoController.AdapterRAM 是 uint32，显存超过 4GB 会
+    回绕成 0 或小值——16GB 级别的卡正好踩中这个坑。剩余显存拿不到，留 0。
+    多适配器（如集显 + 独显）时取显存最大的一块，与「跑模型的那块」一致。
+    """
+    result = executor.run(_ps(
+        "$ad=Get-CimInstance Win32_VideoController | "
+        "Where-Object { $_.Name -notmatch 'Basic Display|Remote Display|Virtual' }; "
+        f"$m=(Get-ChildItem '{_WIN_DISPLAY_CLASS}' | "
+        "ForEach-Object { (Get-ItemProperty $_.PSPath -Name "
+        "'HardwareInformation.qwMemorySize' -ErrorAction SilentlyContinue)"
+        ".'HardwareInformation.qwMemorySize' } | Measure-Object -Maximum).Maximum; "
+        "$i=0; "
+        "foreach ($v in $ad) { "
+        "Write-Output ('GPU' + $i + '_NAME=' + $v.Name); "
+        "Write-Output ('GPU' + $i + '_VENDOR=' + $v.AdapterCompatibility); "
+        "Write-Output ('GPU' + $i + '_DRIVER=' + $v.DriverVersion); "
+        "Write-Output ('GPU' + $i + '_MEM=' + $m); "
+        "$i++ }"
+    ), timeout=20)
+    kv = _parse_kv_lines(result.stdout)
+    best = None
+    for i in range(10):  # 适配器数量有上限，逐个比对取显存最大的一块
+        name = kv.get(f"GPU{i}_NAME", "").strip()
+        if not name:
+            continue
+        mem_gb = _parse_mem_bytes(kv.get(f"GPU{i}_MEM", ""))
+        if best is None or mem_gb > best["total_memory_gb"]:
+            best = {
+                "name": name,
+                "total_memory_gb": mem_gb,
+                "free_memory_gb": 0,
+                "driver": (kv.get(f"GPU{i}_DRIVER", "") or "").strip(),
+                "vendor": _normalize_gpu_vendor(kv.get(f"GPU{i}_VENDOR", "")),
+            }
+    return best
+
+
 def _detect_gpu_static(executor: Executor, target: Target) -> dict:
     # NVIDIA 跨平台
     result = executor.run(
@@ -408,6 +535,12 @@ def _detect_gpu_static(executor: Executor, target: Target) -> dict:
                 }
             except ValueError:
                 pass
+
+    # Windows 上的 AMD/Intel 卡：nvidia-smi 不存在，改用显示适配器列表
+    if target.os == "windows":
+        gpu = _detect_gpu_windows(executor, target)
+        if gpu:
+            return gpu
 
     # macOS Apple Silicon：统一内存，无独立显存，返回芯片 GPU 信息
     if target.os == "macos":

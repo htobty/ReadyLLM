@@ -565,7 +565,8 @@ function AITune({ targetId }) {
 
 export default function Tune({ targetId }) {
   const { t } = useI18n()
-  const [tab, setTab] = useState('auto') // auto | ai
+  // AI 调优是主推路径（LLM 自动探索并解释取舍），默认选中；参数搜索退居第二
+  const [tab, setTab] = useState('ai') // ai | auto
 
   return (
     <div>
@@ -573,17 +574,17 @@ export default function Tune({ targetId }) {
 
       {/* Tab 切换 */}
       <div className="flex gap-1 mb-6 bg-card rounded-lg p-1 border border-gray/30 max-w-xs">
-        <button onClick={() => setTab('auto')}
-          className={`flex-1 py-2 px-4 rounded-md text-sm font-semibold transition ${tab === 'auto' ? 'bg-green text-bg' : 'text-gray hover:text-fg'}`}>
-          {t('tune.auto')}
-        </button>
         <button onClick={() => setTab('ai')}
           className={`flex-1 py-2 px-4 rounded-md text-sm font-semibold transition ${tab === 'ai' ? 'bg-purple text-white' : 'text-gray hover:text-fg'}`}>
           {t('tune.ai')}
         </button>
+        <button onClick={() => setTab('auto')}
+          className={`flex-1 py-2 px-4 rounded-md text-sm font-semibold transition ${tab === 'auto' ? 'bg-green text-bg' : 'text-gray hover:text-fg'}`}>
+          {t('tune.auto')}
+        </button>
       </div>
 
-      {tab === 'auto' ? <AutoTune targetId={targetId} /> : <AITune targetId={targetId} />}
+      {tab === 'ai' ? <AITune targetId={targetId} /> : <AutoTune targetId={targetId} />}
     </div>
   )
 }

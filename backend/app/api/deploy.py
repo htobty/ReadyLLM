@@ -14,6 +14,7 @@ from ..services.engine_adapter import StartParams
 from ..services.engine_registry import get_adapter
 from ..services.collectors import path_join, detect_hardware
 from ..services import tune_history
+from ..services.i18n import L
 
 router = APIRouter()
 
@@ -30,7 +31,7 @@ class DeployRequest(BaseModel):
 def _adapter(target_id: str):
     target = get_target(target_id)
     if not target:
-        raise HTTPException(status_code=404, detail="目标机器不存在，请先在设置中配置")
+        raise HTTPException(status_code=404, detail=L("target.not_found_hint"))
     executor = make_executor(target)
     return target, executor, get_adapter(executor, target)
 
@@ -83,10 +84,10 @@ def list_models(target_id: str):
         if engine_type in ("vllm", "sglang"):
             return {
                 "models": [], "count": 0,
-                "error": f"{engine_type} 加载 HuggingFace 权重（非 GGUF），请直接填写模型 ID 或本地权重目录",
+                "error": L("deploy.hf_weights", engine=engine_type),
             }
         if not target.models_dir:
-            return {"models": [], "count": 0, "error": "未配置模型目录"}
+            return {"models": [], "count": 0, "error": L("deploy.no_models_dir")}
         if target.os == "windows":
             pattern = f'{target.models_dir}\\*.gguf'
             result = executor.run(f'dir /b "{pattern}"', timeout=10)
@@ -112,9 +113,9 @@ def list_video_models(target_id: str):
     """
     target = get_target(target_id)
     if not target:
-        raise HTTPException(status_code=404, detail="目标机器不存在")
+        raise HTTPException(status_code=404, detail=L("target.not_found"))
     if not target.models_dir:
-        return {"models": [], "count": 0, "error": "未配置模型目录"}
+        return {"models": [], "count": 0, "error": L("deploy.no_models_dir")}
 
     diff_dir = path_join(target, target.models_dir, "diffusion_models")
     executor = make_executor(target)
@@ -185,13 +186,13 @@ def get_video_file(target_id: str, filename: str, subfolder: str = ""):
     供前端 <video> 直接预览（控制端无法直连目标机 ComfyUI 端口时的代理）。"""
     target = get_target(target_id)
     if not target:
-        raise HTTPException(status_code=404, detail="目标机器不存在")
+        raise HTTPException(status_code=404, detail=L("target.not_found"))
     root = _comfy_output_root(target)
     if not root:
-        raise HTTPException(status_code=400, detail="未配置 ComfyUI 目录")
+        raise HTTPException(status_code=400, detail=L("deploy.no_comfyui_dir"))
     full = _safe_join(target, root, subfolder, filename)
     if not full:
-        raise HTTPException(status_code=400, detail="非法文件路径")
+        raise HTTPException(status_code=400, detail=L("deploy.illegal_path"))
 
     executor = make_executor(target)
     try:
@@ -199,7 +200,7 @@ def get_video_file(target_id: str, filename: str, subfolder: str = ""):
     finally:
         executor.close()
     if data is None:
-        raise HTTPException(status_code=404, detail="成片文件不存在或读取失败")
+        raise HTTPException(status_code=404, detail=L("deploy.clip_not_found"))
 
     low = filename.lower()
     media = "video/webm" if low.endswith(".webm") else "video/mp4"
@@ -218,7 +219,7 @@ def start_model(req: DeployRequest):
             try:
                 extra = shlex.split(req.args_text.strip())
             except ValueError as e:
-                return {"success": False, "message": f"参数格式错误: {e}"}
+                return {"success": False, "message": L("deploy.params_format_error", err=e)}
         else:
             extra = list(req.extra_args or [])
         # 监控依赖 metrics；服务需对外可达 host。缺失则补，重复则去
@@ -311,9 +312,9 @@ def generate_video(req: VideoGenerateRequest):
     target, executor, engine = _adapter(req.target_id)
     try:
         if not hasattr(engine, "submit_workflow"):
-            return {"success": False, "message": "当前目标机引擎不支持视频生成，请改用 ComfyUI"}
+            return {"success": False, "message": L("deploy.engine_no_video")}
         if not engine.is_running():
-            return {"success": False, "message": "ComfyUI 服务未运行，请先在部署页启动"}
+            return {"success": False, "message": L("deploy.comfyui_not_running")}
 
         # 路线 A：可选的 LLM 提示词编排。失败优雅降级为原始 prompt，绝不阻断生成。
         prompt = req.prompt
@@ -349,18 +350,18 @@ def generate_video(req: VideoGenerateRequest):
             import os as _os
             import uuid as _uuid
             if not _os.path.exists(req.image_path):
-                return {"success": False, "message": f"首帧图不存在: {req.image_path}"}
+                return {"success": False, "message": L("deploy.image_not_exist", path=req.image_path)}
             try:
                 with open(req.image_path, "rb") as _f:
                     img_bytes = _f.read()
             except Exception as e:
-                return {"success": False, "message": f"读取首帧图失败: {e}"}
+                return {"success": False, "message": L("deploy.image_read_fail", err=e)}
             ext = _os.path.splitext(req.image_path)[1] or ".png"
             image_name = f"mdframe_{_uuid.uuid4().hex[:8]}{ext}"
             input_dir = path_join(target, target.engine_path or "", "input")
             remote = path_join(target, input_dir, image_name)
             if not executor.write_file_bytes(img_bytes, remote):
-                return {"success": False, "message": "首帧图上传到目标机 input 目录失败"}
+                return {"success": False, "message": L("deploy.image_upload_fail")}
 
         # R2V：把控制端多张角色参考图上传到目标机 ComfyUI/input，收集文件名列表。
         # 优先级高于 I2V（同一请求两者都给时走 R2V）。
@@ -371,17 +372,17 @@ def generate_video(req: VideoGenerateRequest):
             input_dir = path_join(target, target.engine_path or "", "input")
             for rp in req.ref_image_paths:
                 if not _os.path.exists(rp):
-                    return {"success": False, "message": f"参考图不存在: {rp}"}
+                    return {"success": False, "message": L("deploy.ref_not_exist", path=rp)}
                 try:
                     with open(rp, "rb") as _f:
                         rb = _f.read()
                 except Exception as e:
-                    return {"success": False, "message": f"读取参考图失败: {e}"}
+                    return {"success": False, "message": L("deploy.ref_read_fail", err=e)}
                 ext = _os.path.splitext(rp)[1] or ".png"
                 rname = f"mdref_{_uuid.uuid4().hex[:8]}{ext}"
                 rremote = path_join(target, input_dir, rname)
                 if not executor.write_file_bytes(rb, rremote):
-                    return {"success": False, "message": f"参考图上传失败: {rp}"}
+                    return {"success": False, "message": L("deploy.ref_upload_fail", path=rp)}
                 ref_image_names.append(rname)
 
         workflow = engine.build_video_workflow(
@@ -406,7 +407,7 @@ def generate_video(req: VideoGenerateRequest):
         return {
             "success": True,
             "prompt_id": result,
-            "message": "生成任务已提交",
+            "message": L("deploy.task_submitted"),
             "enhanced": enhanced,
             "i2v": bool(image_name) and not ref_image_names,
             "r2v": bool(ref_image_names),
@@ -425,7 +426,7 @@ def generate_progress(target_id: str, prompt_id: str):
     target, executor, engine = _adapter(target_id)
     try:
         if not hasattr(engine, "get_progress"):
-            return {"state": "error", "message": "当前引擎不支持生成任务查询"}
+            return {"state": "error", "message": L("deploy.no_progress_support")}
         prog = engine.get_progress(prompt_id)
         if prog.get("state") == "completed":
             outputs = prog.get("outputs") or {}
@@ -451,7 +452,7 @@ def generate_progress(target_id: str, prompt_id: str):
 _ARG_ORDER = [
     "ctx-size", "n-gpu-layers", "batch-size", "ubatch-size",
     "cache-type-k", "cache-type-v", "flash-attn", "fit",
-    "spec-type", "spec-draft-n-max", "spec-draft-n-min",
+    "spec-type", "spec-draft-n-max", "spec-draft-n-min", "spec-draft-p-min",
     "gpu-layers-draft", "spec-draft-ngl", "threads",
 ]
 
@@ -504,7 +505,7 @@ def default_args(target_id: str, model: str):
     """
     target = get_target(target_id)
     if not target:
-        raise HTTPException(status_code=404, detail="目标机器不存在")
+        raise HTTPException(status_code=404, detail=L("target.not_found"))
 
     # 0) 非 llama.cpp 引擎（vLLM / SGLang）：调优历史与确定性参数生成器都只面向
     #    llama.cpp 参数体系，对它们不适用；直接返回该引擎适配器声明的通用默认参数。
@@ -517,7 +518,7 @@ def default_args(target_id: str, model: str):
             "source": "engine_default",
             "score": 0,
             "ts": "",
-            "reasoning": [f"{engine_type} 使用引擎通用默认参数（该引擎暂不支持自动调优）"],
+            "reasoning": [L("deploy.engine_generic_args", engine=engine_type)],
         }
 
     # 1) 优先：最近一次调优参数
@@ -579,7 +580,7 @@ def make_storyboard(req: StoryboardRequest):
     sb = generate_storyboard(req.theme, req.total_seconds, req.max_shots)
     if not sb:
         return {"success": False,
-                "message": "分镜生成失败：请确认已在设置中配置可用的大模型 API"}
+                "message": L("deploy.storyboard_fail")}
     return {"success": True, "storyboard": sb}
 
 
@@ -652,33 +653,33 @@ def upscale_image(req: UpscaleRequest):
     target, executor, engine = _adapter(req.target_id)
     try:
         if not hasattr(engine, "build_upscale_workflow"):
-            return {"success": False, "message": "当前引擎不支持超分，请改用 ComfyUI"}
+            return {"success": False, "message": L("deploy.engine_no_upscale")}
         if not engine.is_running():
-            return {"success": False, "message": "ComfyUI 服务未运行，请先在部署页启动"}
+            return {"success": False, "message": L("deploy.comfyui_not_running")}
         name = req.image_name or ""
         if req.image_path:
             import os as _os
             import uuid as _uuid
             if not _os.path.exists(req.image_path):
-                return {"success": False, "message": f"图片不存在: {req.image_path}"}
+                return {"success": False, "message": L("deploy.pic_not_exist", path=req.image_path)}
             try:
                 with open(req.image_path, "rb") as _f:
                     b = _f.read()
             except Exception as e:
-                return {"success": False, "message": f"读取图片失败: {e}"}
+                return {"success": False, "message": L("deploy.pic_read_fail", err=e)}
             ext = _os.path.splitext(req.image_path)[1] or ".png"
             name = f"mdup_{_uuid.uuid4().hex[:8]}{ext}"
             input_dir = path_join(target, target.engine_path or "", "input")
             if not executor.write_file_bytes(b, path_join(target, input_dir, name)):
-                return {"success": False, "message": "图片上传到目标机 input 目录失败"}
+                return {"success": False, "message": L("deploy.pic_upload_fail")}
         if not name:
-            return {"success": False, "message": "需提供 image_path 或 image_name"}
+            return {"success": False, "message": L("deploy.need_image")}
         wf = engine.build_upscale_workflow(
             image_name=name, out_w=req.out_w, out_h=req.out_h)
         ok, result = engine.submit_workflow(wf)
         if not ok:
             return {"success": False, "message": result}
-        return {"success": True, "prompt_id": result, "message": "超分任务已提交"}
+        return {"success": True, "prompt_id": result, "message": L("deploy.upscale_submitted")}
     finally:
         executor.close()
 

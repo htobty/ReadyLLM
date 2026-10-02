@@ -14,6 +14,7 @@ SGLang 是高吞吐推理框架，通过 `sglang serve <model>` 启动 OpenAI �
 from .engine_adapter import EngineAdapter, StartParams
 from .executor import Executor
 from ..models.target import Target
+from .i18n import L
 
 # SGLang 默认推荐启动参数（通用，不含任何特定机器/模型）
 # --enable-metrics 是监控采集的前提：缺少它 /metrics 不会暴露指标
@@ -22,10 +23,7 @@ DEFAULT_ARGS = [
     "--enable-metrics",
 ]
 
-WSL2_HINT = (
-    "SGLang 官方安装说明面向 Linux + NVIDIA GPU。请在 WSL2 (Ubuntu) 中安装并运行，"
-    "或将目标机引擎类型改为 llama.cpp。"
-)
+# Windows 拦截提示：文案走 i18n（key: detect.sglang_windows），按界面语言在调用时取
 
 
 class SGLangAdapter(EngineAdapter):
@@ -56,7 +54,7 @@ class SGLangAdapter(EngineAdapter):
 
     def start(self, params: StartParams) -> tuple[bool, str]:
         if self.target.os == "windows":
-            return False, WSL2_HINT
+            return False, L("detect.sglang_windows")
 
         args = list(params.extra_args) if params.extra_args else list(DEFAULT_ARGS)
         # 监控数据依赖 --enable-metrics，用户自定义参数里没给就补上
@@ -75,17 +73,17 @@ class SGLangAdapter(EngineAdapter):
         run_cmd = f"nohup {cmd} > /tmp/sglang_server.log 2>&1 &"
         result = self.executor.run(run_cmd, timeout=20)
         if not result.ok:
-            return False, f"启动失败: {result.stdout} {result.stderr}"
-        return True, "SGLang 启动命令已发送（首次加载模型需下载权重，请耐心等待）"
+            return False, L("engine.start_fail", err=f"{result.stdout} {result.stderr}")
+        return True, L("engine.start_sent_weights")
 
     def stop(self) -> tuple[bool, str]:
         if self.target.os == "windows":
-            return False, WSL2_HINT
+            return False, L("detect.sglang_windows")
         # sglang serve 会派生 scheduler / detokenizer 子进程，按名匹配一并结束
         result = self.executor.run("pkill -f 'sglang'", timeout=10)
         if result.ok:
-            return True, "SGLang 服务已停止"
-        return False, f"停止结果: {result.stdout} {result.stderr}"
+            return True, L("engine.stop_ok")
+        return False, L("engine.stop_result", err=f"{result.stdout} {result.stderr}")
 
     def is_running(self) -> bool:
         if self.target.os == "windows":

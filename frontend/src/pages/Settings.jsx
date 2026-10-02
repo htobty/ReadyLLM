@@ -307,6 +307,9 @@ export default function Settings({ targets, onSaved, onChanged }) {
               <div className="mt-2 text-fg/80">
                 GPU: {testResult.hardware.gpu.name} ({testResult.hardware.gpu.total_memory_gb}G) ·
                 {t('settings.memory')} {testResult.hardware.memory?.total_gb}G
+                {['amd', 'intel', 'other'].includes(testResult.hardware.gpu.vendor) && (
+                  <div className="mt-1 text-yellow/90">{t('settings.gpuNonNvidia')}</div>
+                )}
               </div>
             )}
           </div>

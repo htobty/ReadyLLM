@@ -26,6 +26,7 @@ from ..models.target import Target, get_target
 from .executor import Executor
 from .engine_adapter import StartParams
 from .llama_cpp import LlamaCppAdapter
+from .i18n import L, get_lang, set_lang
 from .config_generator import generate_config
 
 # ==================== 配置 ====================
@@ -39,7 +40,7 @@ PARAM_WHITELIST = [
     "n-gpu-layers", "gpu-layers", "gpu-layers-draft",
     "cache-type-k", "cache-type-v",
     "flash-attn", "spec-type", "spec-draft-n-max", "spec-draft-n-min",
-    "spec-draft-ngl", "fit", "parallel", "numa", "mlock", "no-mmap",
+    "spec-draft-p-min", "spec-draft-ngl", "fit", "parallel", "numa", "mlock", "no-mmap",
     "rope-scaling", "keep", "tensor-split", "main-gpu", "split-mode",
     "override-kv", "load-mode",
 ]
@@ -69,7 +70,7 @@ def test_connection(cfg: dict) -> dict:
     """测试 LLM API 连通性，返回 {ok, message, model_info}"""
     url = cfg.get("api_url", "").rstrip("/")
     if not url:
-        return {"ok": False, "message": "API 地址为空"}
+        return {"ok": False, "message": L("tune.ai.conn.empty_url")}
     # 尝试 /v1/models 端点
     models_url = f"{url}/models" if "/v1" in url else f"{url}/v1/models"
     headers = {"Content-Type": "application/json"}
@@ -80,15 +81,15 @@ def test_connection(cfg: dict) -> dict:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
             models = [m.get("id", "") for m in data.get("data", [])]
-            return {"ok": True, "message": f"连接成功，可用模型: {', '.join(models[:5])}",
+            return {"ok": True, "message": L("tune.ai.conn.ok", models=", ".join(models[:5])),
                     "models": models}
     except urllib.error.HTTPError as e:
         # 401/403 说明地址对但认证问题；404 可能没有 /models 端点但服务在
         if e.code in (401, 403):
-            return {"ok": False, "message": f"认证失败 (HTTP {e.code})，请检查 API Key"}
-        return {"ok": True, "message": f"服务可达 (HTTP {e.code})，但无法列出模型"}
+            return {"ok": False, "message": L("tune.ai.conn.auth_fail", code=e.code)}
+        return {"ok": True, "message": L("tune.ai.conn.reachable", code=e.code)}
     except Exception as e:
-        return {"ok": False, "message": f"连接失败: {e}"}
+        return {"ok": False, "message": L("tune.ai.conn.fail", err=e)}
 
 
 # ==================== Prompt 构造 ====================
@@ -138,7 +139,23 @@ def _build_system_prompt(hardware: dict, model_info: dict, ctx_size: int,
 不要大幅偏离基线（如把 ngl 改成部分卸载、去掉投机解码），这些已经被验证是最优方向。
 """
 
-    return f"""你是一个 llama.cpp 推理参数精调专家。系统已经通过确定性算法生成了一组经过验证的基础配置，你的任务是在此基础上做小幅探索，寻找可能的性能提升。
+    # 英文界面的调优：LLM 的自由文本（reasoning）会原样渲染到界面与日志，而这份提示词
+    # 和后续每轮的反馈消息都是中文，模型会顺口用中文作答。这里显式指定输出语言，并强调
+    # 与输入语言无关——否则中文的测速反馈会把它带回中文。
+    # 中文界面不注入任何内容，原有提示词保持逐字节不变。
+    lang_rule = ""
+    lang_tip = ""
+    if get_lang() == "en":
+        lang_rule = """
+## Output language
+Write all natural-language fields in English, especially `reasoning`. This rule holds
+regardless of the language used in this prompt or in the feedback messages that follow:
+those are written in Chinese, and your output must still be English.
+JSON keys and parameter names stay unchanged.
+"""
+        lang_tip = "\n- `reasoning` must be written in English (not Chinese)"
+
+    return f"""你是一个 llama.cpp 推理参数精调专家。系统已经通过确定性算法生成了一组经过验证的基础配置，你的任务是在此基础上做小幅探索，寻找可能的性能提升。{lang_rule}
 
 ## 硬件环境
 {chr(10).join(hw_lines)}
@@ -165,11 +182,13 @@ def _build_system_prompt(hardware: dict, model_info: dict, ctx_size: int,
 
 ## 你可以探索的方向（按优先级）
 1. spec-draft-n-max: 尝试 2/3/4/5（影响投机解码接受长度）
-2. batch-size / ubatch-size: 在基线附近 ±50% 范围微调
-3. cache-type-k/v: 如果基线用 f16，可试 q8_0 看是否有速度差异（通常差异 <5%）
-4. threads: 在物理核数附近 ±2 微调
-5. parallel: 如果有并发需求可尝试 2
-6. 如果基线没有启用投机解码（显存不够），不要强行启用
+2. spec-draft-p-min: 尝试 0/0.5/0.8（投机接受概率下限：draft 头一旦不够确定就提前收手，
+   不再往下瞎猜。调高它可以让更大的 n-max 更划算——见 llama.cpp discussion #25198）
+3. batch-size / ubatch-size: 在基线附近 ±50% 范围微调
+4. cache-type-k/v: 如果基线用 f16，可试 q8_0 看是否有速度差异（通常差异 <5%）
+5. threads: 在物理核数附近 ±2 微调
+6. parallel: 如果有并发需求可尝试 2
+7. 如果基线没有启用投机解码（显存不够），不要强行启用
 
 ## 输出格式（严格 JSON）
 每轮你必须输出一个 JSON 对象：
@@ -184,7 +203,7 @@ def _build_system_prompt(hardware: dict, model_info: dict, ctx_size: int,
 - params 中的值全部用字符串
 - 不要输出 JSON 以外的内容
 - 每轮只输出一组参数
-- 每次只改 1-2 个参数，不要同时改太多（否则无法判断哪个变化有效）
+- 每次只改 1-2 个参数，不要同时改太多（否则无法判断哪个变化有效）{lang_tip}
 """
 
 
@@ -230,20 +249,20 @@ def _call_llm(cfg: dict, messages: List[dict], job_id: str = None) -> Optional[s
 
     url = cfg.get("api_url", "").rstrip("/")
     if not url:
-        _log("  LLM 失败: API 地址为空，请先在 AI 调优设置里填写 api_url")
+        _log(L("tune.ai.llm.no_url"))
         return None
     if not url.endswith("/chat/completions"):
         if "/v1" in url:
             url = f"{url}/chat/completions"
         else:
             url = f"{url}/v1/chat/completions"
-    _log(f"  → 请求 LLM: {url} | model={cfg.get('model_name', '')}")
+    _log(L("tune.ai.llm.request", url=url, model=cfg.get("model_name", "")))
 
     headers = {"Content-Type": "application/json"}
     if cfg.get("api_key"):
         headers["Authorization"] = f"Bearer {cfg['api_key']}"
     else:
-        _log("  ⚠ 未配置 API Key（若服务需要鉴权会返回 401）")
+        _log(L("tune.ai.llm.no_key"))
 
     payload = json.dumps({
         "model": cfg.get("model_name", ""),
@@ -260,18 +279,18 @@ def _call_llm(cfg: dict, messages: List[dict], job_id: str = None) -> Optional[s
             if choices:
                 return choices[0].get("message", {}).get("content", "")
             # 请求成功但无 choices：多半是模型名不对或返回结构异常
-            _log(f"  LLM 返回无 choices，原始响应: {json.dumps(data, ensure_ascii=False)[:400]}")
+            _log(L("tune.ai.llm.no_choices", raw=json.dumps(data, ensure_ascii=False)[:400]))
     except urllib.error.HTTPError as e:
         body = ""
         try:
             body = e.read().decode(errors="replace")[:400]
         except Exception:
             pass
-        _log(f"  LLM HTTP {e.code} 错误: {body}")
+        _log(L("tune.ai.llm.http_error", code=e.code, body=body))
     except urllib.error.URLError as e:
-        _log(f"  LLM 网络错误（地址不通/超时/DNS）: {e.reason}")
+        _log(L("tune.ai.llm.net_error", err=e.reason))
     except Exception as e:
-        _log(f"  LLM 调用异常: {type(e).__name__}: {e}")
+        _log(L("tune.ai.llm.exception", err=f"{type(e).__name__}: {e}"))
     return None
 
 
@@ -366,17 +385,19 @@ def list_active_jobs(target_id: str) -> list:
 def start_ai_tune(target_id: str, model: str, ctx_size: int,
                   goal: str, user_desc: str) -> dict:
     """启动 AI Agent 调优任务"""
+    # 后台线程不继承请求上下文，先捕获发起时的界面语言，进 worker 再设回去
+    lang = get_lang()
     target = get_target(target_id)
     if not target:
-        return {"ok": False, "message": "目标机器不存在"}
+        return {"ok": False, "message": L("tune.err.no_target")}
     if not target.engine_path:
-        return {"ok": False, "message": "未配置推理引擎"}
+        return {"ok": False, "message": L("tune.ai.err.no_engine")}
     if getattr(target, "engine_type", "llama_cpp") != "llama_cpp":
-        return {"ok": False, "message": "AI 调优目前仅支持 llama.cpp 引擎（vLLM 参数体系不同，暂不支持）"}
+        return {"ok": False, "message": L("tune.ai.err.llama_only")}
 
     cfg = get_config()
     if not cfg.get("api_url"):
-        return {"ok": False, "message": "未配置 AI API，请先在设置中配置"}
+        return {"ok": False, "message": L("tune.ai.err.no_api")}
 
     job_id = uuid.uuid4().hex[:8]
     with _LOCK:
@@ -389,6 +410,7 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
 
     def _worker():
         executor = None
+        set_lang(lang)
         try:
             from .executor import make_executor
             from .collectors import path_join, detect_hardware
@@ -396,11 +418,11 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
             engine = LlamaCppAdapter(executor, target)
 
             if not engine.check_installed():
-                _fail(job_id, "目标机未检测到推理引擎")
+                _fail(job_id, L("tune.ai.log.no_engine"))
                 return
 
             # 采集硬件信息
-            _append_log(job_id, "采集硬件信息...")
+            _append_log(job_id, L("tune.ai.log.collect_hw"))
             hardware = detect_hardware(executor, target)
             hardware["os"] = target.os
 
@@ -409,8 +431,9 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
             model_size_gb = _get_model_size(executor, target, model_path)
             model_info = {"filename": model, "size_gb": model_size_gb}
 
-            _append_log(job_id, f"硬件: {hardware.get('gpu', {}).get('name', '?')} | "
-                                f"模型: {model} ({model_size_gb}GB) | ctx: {ctx_size}")
+            _append_log(job_id, L("tune.ai.log.hw",
+                                  gpu=hardware.get("gpu", {}).get("name", "?"),
+                                  model=model, size=model_size_gb, ctx=ctx_size))
 
             # ===== 新架构：确定性生成器出基线 → 实测 → 喂给 LLM =====
             gpu_info = hardware.get("gpu", {})
@@ -424,12 +447,13 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
             _hist = _hist_get(target_id, model)
             if _hist and _hist.get("params"):
                 baseline_params = dict(_hist["params"])
-                _src = "自动调优" if _hist.get("source") == "tuner" else "AI 调优"
-                _append_log(job_id, f"采用上次调优结果作为基线（{_src}，"
-                                    f"实测 {_hist.get('score', 0)} t/s，{_hist.get('ts', '')}）")
-                _append_log(job_id, f"  参数: {json.dumps(baseline_params, ensure_ascii=False)}")
+                _src = L("tune.src.tuner") if _hist.get("source") == "tuner" else L("tune.src.ai")
+                _append_log(job_id, L("tune.ai.log.baseline_from_history", src=_src,
+                                      score=_hist.get("score", 0), ts=_hist.get("ts", "")))
+                _append_log(job_id, L("tune.ai.log.params",
+                                      params=json.dumps(baseline_params, ensure_ascii=False)))
             else:
-                _append_log(job_id, "生成确定性基础配置...")
+                _append_log(job_id, L("tune.ai.log.gen_config"))
                 gen_result = generate_config(
                     gpu_vram_gb=gpu_vram,
                     model_size_gb=model_size_gb,
@@ -445,18 +469,20 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
                     _append_log(job_id, f"  ⚠ {w}")
 
             # 实测基线配置
-            _append_log(job_id, "实测基线配置...")
+            _append_log(job_id, L("tune.ai.log.baseline_test"))
             valid_baseline = _validate_params(baseline_params)
-            _append_log(job_id, f"  参数: {json.dumps(valid_baseline, ensure_ascii=False)}")
+            _append_log(job_id, L("tune.ai.log.params",
+                                  params=json.dumps(valid_baseline, ensure_ascii=False)))
             baseline_metrics = _run_test(executor, target, engine, model_path,
                                          valid_baseline, ctx_size, job_id)
 
             if baseline_metrics:
-                _append_log(job_id, f"  ✓ 基线实测: 解码 {baseline_metrics.get('decode', 0)} t/s | "
-                                    f"预填充 {baseline_metrics.get('prefill', 0)} t/s | "
-                                    f"GPU {baseline_metrics.get('gpu_util', 0)}%")
+                _append_log(job_id, L("tune.ai.log.baseline_ok",
+                                      decode=baseline_metrics.get('decode', 0),
+                                      prefill=baseline_metrics.get('prefill', 0),
+                                      gpu=baseline_metrics.get('gpu_util', 0)))
             else:
-                _append_log(job_id, "  ⚠ 基线实测失败，AI 将从零开始")
+                _append_log(job_id, L("tune.ai.log.baseline_fail"))
 
             # 记录基线为第 0 轮
             with _LOCK:
@@ -464,7 +490,7 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
                     "round": 0,
                     "params": valid_baseline,
                     "metrics": baseline_metrics,
-                    "reasoning": "确定性生成器输出（非 AI）",
+                    "reasoning": L("tune.reason.deterministic"),
                 })
 
             # 构造 LLM 对话（含基线信息）
@@ -484,17 +510,17 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
                 best_result = {"params": valid_baseline, "metrics": baseline_metrics, "round": 0}
 
             for round_num in range(1, MAX_ROUNDS + 1):
-                _append_log(job_id, f"【第 {round_num}/{MAX_ROUNDS} 轮】调用 AI 分析...")
+                _append_log(job_id, L("tune.ai.log.round", n=round_num, max=MAX_ROUNDS))
 
                 # 调 LLM
                 response = _call_llm(cfg, messages, job_id)
                 if response is None:
-                    _fail(job_id, f"第 {round_num} 轮 LLM 调用失败（原因见上方日志）")
+                    _fail(job_id, L("tune.fail.round_llm", n=round_num))
                     return
 
                 parsed = _parse_llm_response(response)
                 if parsed is None:
-                    _append_log(job_id, f"  ⚠ AI 返回无法解析，原始内容: {response[:200]}")
+                    _append_log(job_id, L("tune.ai.log.parse_fail", raw=response[:200]))
                     # 把错误反馈给 LLM 重试
                     messages.append({"role": "assistant", "content": response})
                     messages.append({"role": "user", "content": "你的输出不是合法 JSON，请严格按格式重新输出。"})
@@ -504,10 +530,11 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
                 reasoning = parsed.get("reasoning", "")
                 params = parsed.get("params", {})
 
-                _append_log(job_id, f"  AI 分析: {reasoning[:150]}")
+                _append_log(job_id, L("tune.ai.log.ai_reasoning", text=reasoning[:150]))
 
                 if action == "done":
-                    _append_log(job_id, f"  ✓ AI 认为已找到最优 (置信度: {parsed.get('confidence', '?')})")
+                    _append_log(job_id, L("tune.ai.log.ai_done",
+                                          conf=parsed.get("confidence", "?")))
                     final_params = _validate_params(params)
                     with _LOCK:
                         job = _JOBS[job_id]
@@ -519,39 +546,42 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
                         }
                         job["status"] = "success"
                         _tid, _model, _ctx = job["target_id"], job["model"], job["ctx_size"]
-                    _append_log(job_id, f"✓ AI 调优完成，推荐参数: {json.dumps(final_params, ensure_ascii=False)}")
+                    _append_log(job_id, L("tune.ai.log.ai_final",
+                                          params=json.dumps(final_params, ensure_ascii=False)))
                     # 落盘最近调优参数，供部署页作为默认参数回填
                     try:
                         from .tune_history import save_latest
                         save_latest(_tid, _model, _ctx, final_params,
                                     source="ai_tuner", score=best_score)
                     except Exception as e:
-                        _append_log(job_id, f"  ⚠ 调优结果落盘失败: {e}")
+                        _append_log(job_id, L("tune.log.save_fail", err=e))
                     return
 
                 if action != "test":
-                    _append_log(job_id, f"  ⚠ 未知 action: {action}，要求 AI 重试")
+                    _append_log(job_id, L("tune.ai.log.unknown_action", action=action))
                     messages.append({"role": "assistant", "content": response})
                     messages.append({"role": "user", "content": "action 必须是 test 或 done，请重新输出。"})
                     continue
 
                 # 执行测试
                 valid_params = _validate_params(params)
-                _append_log(job_id, f"  测试参数: {json.dumps(valid_params, ensure_ascii=False)}")
+                _append_log(job_id, L("tune.ai.log.test_params",
+                                      params=json.dumps(valid_params, ensure_ascii=False)))
 
                 metrics = _run_test(executor, target, engine, model_path,
                                     valid_params, ctx_size, job_id)
 
                 if metrics is None:
-                    _append_log(job_id, "  ✗ 测试失败（启动超时或异常）")
+                    _append_log(job_id, L("tune.ai.log.test_fail"))
                     test_msg = f"第 {round_num} 轮测试失败：模型启动超时或参数无效。请换一组参数重试。"
                 else:
                     score = metrics.get("decode", 0)
-                    _append_log(job_id, f"  结果: 解码 {metrics['decode']} t/s | "
-                                        f"预填充 {metrics['prefill']} t/s | "
-                                        f"GPU {metrics['gpu_util']}% | 显存 {metrics['gpu_mem_pct']}% | "
-                                        f"CPU {metrics.get('cpu_pct', 0)}% | "
-                                        f"内存 {metrics.get('mem_used_gb', 0)}/{metrics.get('mem_total_gb', 0)}GB")
+                    _append_log(job_id, L("tune.ai.log.result",
+                                          decode=metrics['decode'], prefill=metrics['prefill'],
+                                          gpu=metrics['gpu_util'], vram=metrics['gpu_mem_pct'],
+                                          cpu=metrics.get('cpu_pct', 0),
+                                          mem=metrics.get('mem_used_gb', 0),
+                                          memtotal=metrics.get('mem_total_gb', 0)))
                     test_msg = _build_test_result_message(round_num, valid_params, metrics)
 
                     # 记录最佳
@@ -573,23 +603,23 @@ def start_ai_tune(target_id: str, model: str, ctx_size: int,
                 messages.append({"role": "user", "content": test_msg})
 
             # 达到最大轮次
-            _append_log(job_id, f"达到最大轮次 {MAX_ROUNDS}，使用历史最佳结果")
+            _append_log(job_id, L("tune.ai.log.max_rounds", max=MAX_ROUNDS))
             if best_result:
                 with _LOCK:
                     job = _JOBS[job_id]
                     job["best"] = {
                         "params": best_result["params"],
-                        "reasoning": f"达到最大轮次，取历史最佳（第 {best_result['round']} 轮）",
+                        "reasoning": L("tune.reason.max_rounds", n=best_result['round']),
                         "confidence": "medium",
                         "round": best_result["round"],
                     }
                     job["status"] = "success"
             else:
-                _fail(job_id, "所有轮次均失败")
+                _fail(job_id, L("tune.fail.all_rounds"))
 
         except Exception as e:
             _fail(job_id, str(e))
-            _append_log(job_id, f"✗ 异常: {e}")
+            _append_log(job_id, L("tune.log.exception", err=e))
         finally:
             try:
                 if executor:
@@ -629,11 +659,11 @@ def _run_test(executor: Executor, target: Target, engine: LlamaCppAdapter,
 
     ok, msg = engine.start(StartParams(model_path=model_path, extra_args=args))
     if not ok:
-        _append_log(job_id, f"  启动失败: {msg}")
+        _append_log(job_id, L("tune.ai.log.start_fail", err=msg))
         return None
 
     if not _wait_ready(executor, target):
-        _append_log(job_id, "  启动超时")
+        _append_log(job_id, L("tune.ai.log.start_timeout"))
         engine.stop()
         return None
 

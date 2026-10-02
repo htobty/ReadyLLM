@@ -19,6 +19,8 @@
 import re
 from typing import Optional
 
+from .i18n import L
+
 # KV cache 每 token 每层的显存占用（字节），按量化级别
 # 近似公式：2(K+V) × head_dim × bytes_per_element
 # 对 27B 级模型（head_dim≈128, 64层）：每 token 约 2×128×64×bytes = 16384×bytes
@@ -70,7 +72,7 @@ def generate_config(
     # ========== 规则 0：推断模型层数 ==========
     if num_layers <= 0:
         num_layers = _infer_layers(model_filename, model_size_gb)
-        reasoning.append(f"推断模型层数: {num_layers}（基于文件名和大小）")
+        reasoning.append(L("cfg.gen.layers", n=num_layers))
 
     # ========== 规则 1：GPU 卸载策略 ==========
     usable_vram = gpu_vram_gb * _VRAM_HEADROOM
@@ -78,21 +80,19 @@ def generate_config(
 
     if model_fits:
         params["n-gpu-layers"] = "all"
-        reasoning.append(
-            f"模型 {model_size_gb:.1f}GB < 可用显存 {usable_vram:.1f}GB "
-            f"({gpu_vram_gb}×{_VRAM_HEADROOM}) → 全量 GPU 卸载"
-        )
+        reasoning.append(L(
+            "cfg.gen.fits", size=f"{model_size_gb:.1f}", avail=f"{usable_vram:.1f}",
+            vram=gpu_vram_gb, headroom=_VRAM_HEADROOM,
+        ))
     else:
         # 模型放不下：计算能放多少层
         layers_fit = int((usable_vram / model_size_gb) * num_layers * 0.9)
         params["n-gpu-layers"] = str(max(layers_fit, 1))
-        warnings.append(
-            f"模型 {model_size_gb:.1f}GB 超过可用显存 {usable_vram:.1f}GB，"
-            f"只能卸载 {layers_fit}/{num_layers} 层到 GPU，性能会显著下降"
-        )
-        reasoning.append(
-            f"模型放不下 → 部分卸载 {layers_fit} 层（这是唯一允许非 all 的情况）"
-        )
+        warnings.append(L(
+            "cfg.gen.over", size=f"{model_size_gb:.1f}", avail=f"{usable_vram:.1f}",
+            fit=layers_fit, total=num_layers,
+        ))
+        reasoning.append(L("cfg.gen.partial", fit=layers_fit))
 
     # ========== 规则 2+3：KV cache 量化 + 投机解码（联合决策） ==========
     # 核心原则：投机解码的收益（+50~100%）远大于 cache 精度差异（<5%），
@@ -112,33 +112,33 @@ def generate_config(
         if cache_type is None:
             # 即使 q4_0 也放不下 draft → 放弃投机，用最高精度 cache
             cache_type = _choose_cache_type(remaining_vram, ctx_size, num_layers)
-            warnings.append("显存余量不足以同时容纳 draft 模型，跳过投机解码")
-            reasoning.append("显存不足以启用投机解码，回退到无投机方案")
+            warnings.append(L("cfg.gen.mtp_no_room"))
+            reasoning.append(L("cfg.gen.mtp_fallback"))
         else:
             params["spec-type"] = "draft-mtp"
             params["spec-draft-n-max"] = "3"
             params["gpu-layers-draft"] = "all"
             params["spec-draft-ngl"] = "all"
             kv_usage = _estimate_kv_gb(ctx_size, num_layers, cache_type)
-            reasoning.append(
-                f"模型支持 MTP，为保证投机解码选用 cache={cache_type}"
-                f"（KV 占 {kv_usage:.1f}GB + draft {_DRAFT_OVERHEAD_GB}GB，"
-                f"剩余 {remaining_vram - kv_usage - _DRAFT_OVERHEAD_GB:.1f}GB）"
-            )
+            reasoning.append(L(
+                "cfg.gen.mtp_cache", cache=cache_type, kv=f"{kv_usage:.1f}",
+                draft=_DRAFT_OVERHEAD_GB,
+                left=f"{remaining_vram - kv_usage - _DRAFT_OVERHEAD_GB:.1f}",
+            ))
     else:
         # 不支持 MTP 或模型放不下 → 只选最高精度 cache
         cache_type = _choose_cache_type(remaining_vram, ctx_size, num_layers)
         kv_usage = _estimate_kv_gb(ctx_size, num_layers, cache_type)
         if not supports_mtp:
-            reasoning.append("模型不支持 MTP 投机解码（文件名未检测到相关标记）")
+            reasoning.append(L("cfg.gen.no_mtp"))
 
     params["cache-type-k"] = cache_type
     params["cache-type-v"] = cache_type
     kv_usage = _estimate_kv_gb(ctx_size, num_layers, cache_type)
-    reasoning.append(
-        f"剩余显存 {remaining_vram:.1f}GB，ctx={ctx_size}，"
-        f"KV cache({cache_type}) 约占 {kv_usage:.1f}GB"
-    )
+    reasoning.append(L(
+        "cfg.gen.kv", left=f"{remaining_vram:.1f}", ctx=ctx_size,
+        cache=cache_type, kv=f"{kv_usage:.1f}",
+    ))
 
     # ========== 规则 4：batch 大小 ==========
     # batch 主要影响预填充速度，解码阶段影响小
@@ -155,15 +155,13 @@ def generate_config(
         batch, ubatch = 1024, 256
     params["batch-size"] = str(batch)
     params["ubatch-size"] = str(ubatch)
-    reasoning.append(
-        f"扣除模型+KV+draft后剩余 {after_all:.1f}GB → batch={batch}, ubatch={ubatch}"
-    )
+    reasoning.append(L("cfg.gen.batch", left=f"{after_all:.1f}", batch=batch, ubatch=ubatch))
 
     # ========== 规则 5：线程数 ==========
     # 线程数 = 物理核数，但不超过 32（超过后收益递减）
     threads = min(cpu_cores, 32)
     params["threads"] = str(threads)
-    reasoning.append(f"CPU {cpu_cores} 核 → threads={threads}")
+    reasoning.append(L("cfg.gen.threads", cores=cpu_cores, threads=threads))
 
     # ========== 固定参数 ==========
     params["flash-attn"] = "on"

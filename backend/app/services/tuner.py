@@ -9,7 +9,8 @@
      - 连续微调类：batch-size / ubatch-size / spec-draft-n-max → fine 阶段坐标下降
   2. 显存可行性预检：估算权重+KV+cache 占用，放不下的组合直接跳过，不浪费启动时间
   3. 两阶段搜索：coarse 定主导因素 → fine 在最优组合附近收敛
-  4. 可信测速：warmup + 正式 3 次取中位数，记录解码/预填充/TTFT/GPU 利用率
+  4. 可信测速：预热 2 次 + 正式 3 次取中位数（解码测速用 ignore_eos 跑满固定窗口，
+     避免模型提前 EOS 导致测量窗口塌缩），记录解码/预填充/TTFT/GPU 利用率
   5. 基线对比：以用户原始参数为 baseline 先测，输出"推荐 vs 当前"
 
 优化目标可选：latency(端到端体感,默认) / throughput(纯解码吞吐) / prefill(长文本预填充)。
@@ -26,6 +27,7 @@ from typing import Optional, List, Dict
 from .executor import Executor
 from .engine_adapter import StartParams
 from .llama_cpp import LlamaCppAdapter
+from .i18n import L, get_lang, set_lang
 from ..models.target import Target, get_target
 
 _JOBS: dict = {}
@@ -62,8 +64,16 @@ _BENCH_LONG_PROMPT = (
     "在保持参数量的同时大幅降低每次前向传播的计算量。这些技术的组合使用使得"
     "在单张消费级显卡上部署数十亿参数的模型成为现实，为本地化AI应用奠定了基础。"
 ) * 6  # ×6 ≈ 2400+ tokens
-_BENCH_MAX_TOKENS = 128
-_BENCH_REPEATS = 3  # 正式测速重复次数，取中位数
+# 解码测速的固定生成窗口。必须配合 ignore_eos 把窗口跑满：基准 prompt 是「请用一句话
+# 解释什么是大语言模型」，不加 ignore_eos 时模型约 24 个 token 就 EOS，n_predict 形同虚设。
+# 而 llama.cpp 的 predicted_per_second 分母从第二个 token 才开始计时（实测恒等于
+# (predicted_n-1)/predicted_ms），窗口越短越吃亏。同机同参数实测三档：
+#   24 token（改动前）49~56 t/s → 256 token 85.2 t/s → 512 token 98.6 t/s
+# 512 档已与"强制跑 512 token 长输出"的真值 99.7 t/s 重合，故取 512：
+# 单次多花约 5 秒，远小于窗口过短把吞吐低估近一半的代价。
+_BENCH_MAX_TOKENS = 512
+_BENCH_REPEATS = 3   # 正式测速重复次数，取中位数
+_BENCH_WARMUP = 2    # 预热次数，丢弃不计分：模型刚加载完的首个请求比稳态低约 18%
 
 # ==================== 参数分层 ====================
 
@@ -79,6 +89,10 @@ CONTINUOUS_GRID = {
     "threads": [16, 24, 32],            # CPU 线程，影响预填充与 CPU 端协同
     "spec-draft-n-max": [2, 3, 4, 5],   # 投机一次预测多少 token
     "spec-draft-n-min": [1, 2, 3],      # 投机最少接受阈值，影响投机效率
+    # 投机解码的接受概率下限：draft 头一旦不够确定就提前收手，不再往下猜。
+    # llama.cpp 默认 0.0（不设限）；调高可让投机在开放文本上不浪费算力，
+    # 使更大的 spec-draft-n-max 收益更稳（见 llama.cpp discussion #25198）
+    "spec-draft-p-min": [0.0, 0.5, 0.8],
 }
 
 # 目标可选评分权重：(解码速度, 预填充速度, TTFT)
@@ -87,15 +101,44 @@ GOAL_WEIGHTS = {
     "throughput": {"decode": 1.0, "prefill": 0.0, "ttft": 0.0},
     "prefill":    {"decode": 0.2, "prefill": 0.8, "ttft": 0.0},
 }
-GOAL_LABELS = {
-    "latency": "端到端体感",
-    "throughput": "解码吞吐",
-    "prefill": "长文本预填充",
+GOAL_KEYS = {
+    "latency": "tune.goal.latency",
+    "throughput": "tune.goal.throughput",
+    "prefill": "tune.goal.prefill",
 }
 
 
-def _normalize_cfg(spec_type, cache_type, ngl, batch, ubatch, draft_n_max) -> dict:
-    """一个完整配置 = 离散主导因素 + 连续微调参数"""
+def goal_label(goal: str) -> str:
+    """按当前界面语言取优化目标名称（模块级常量不能存 L() 结果，须运行期求值）"""
+    return L(GOAL_KEYS.get(goal, goal))
+
+
+def _fmt_num(val) -> str:
+    """数值参数转命令行字符串：1.0 → "1"、0.8 → "0.8"（整数不带小数点，贴近手写习惯）"""
+    if isinstance(val, str):
+        return val
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return str(val)
+    return str(int(f)) if f == int(f) else str(f)
+
+
+def _parse_num(val) -> float:
+    """命令行参数值转 float，兼容 "0.8" / "2" / 2 等写法；非法值返回 0.0"""
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_cfg(spec_type, cache_type, ngl, batch, ubatch, draft_n_max,
+                   draft_p_min=0.0) -> dict:
+    """一个完整配置 = 离散主导因素 + 连续微调参数
+
+    draft_p_min 默认 0.0，与 llama.cpp 的 --spec-draft-p-min 默认值保持一致：
+    coarse 阶段按默认值起跑，交给 fine 阶段的坐标下降去搜更优的概率下限。
+    """
     cfg = {
         "spec-type": spec_type,
         "cache-type-k": cache_type,
@@ -108,11 +151,12 @@ def _normalize_cfg(spec_type, cache_type, ngl, batch, ubatch, draft_n_max) -> di
     if spec_type != "off":
         cfg["spec-draft-n-max"] = str(draft_n_max)
         cfg["spec-draft-n-min"] = "2"
+        cfg["spec-draft-p-min"] = _fmt_num(draft_p_min)
     return cfg
 
 
 def _cfg_label(cfg: dict) -> str:
-    return " / ".join(f"{k}={v}" for k, v in cfg.items())
+    return " / ".join(f"{k}={_fmt_num(v)}" for k, v in cfg.items())
 
 
 def _args_list(cfg: dict, target: Target, ctx_size: int) -> List[str]:
@@ -241,6 +285,8 @@ def _bench_once(executor: Executor, target: Target, ctx_size: int) -> dict:
     short = _curl_completion(executor, target, {
         "prompt": _BENCH_PROMPT,
         "n_predict": _BENCH_MAX_TOKENS,
+        # 强制跑满 n_predict：不加这项时模型答完一句就 EOS，测量窗口塌缩到 ~24 token
+        "ignore_eos": True,
         "temperature": 0,
         "stream": False,
     })
@@ -283,8 +329,13 @@ def _bench_once(executor: Executor, target: Target, ctx_size: int) -> dict:
 
 
 def _bench_median(executor: Executor, target: Target, ctx_size: int) -> dict:
-    """warmup 1 次 + 正式 _BENCH_REPEATS 次，各指标取中位数"""
-    _bench_once(executor, target, ctx_size)  # warmup，丢弃
+    """预热 _BENCH_WARMUP 次（丢弃）+ 正式 _BENCH_REPEATS 次，各指标取中位数
+
+    预热必须够：模型刚加载完的首个请求比稳态低约 18%（实测 56.12 → 68.67 t/s，
+    首帧计算图构建等一次性开销），只预热 1 次会把这份冷启动损耗算进正式结果。
+    """
+    for _ in range(_BENCH_WARMUP):
+        _bench_once(executor, target, ctx_size)  # 预热，丢弃
     runs = [_bench_once(executor, target, ctx_size) for _ in range(_BENCH_REPEATS)]
     return {
         "decode": round(median(r["decode"] for r in runs), 2),
@@ -363,17 +414,18 @@ def _run_one(executor: Executor, target: Target, engine: LlamaCppAdapter,
     params = StartParams(model_path=model_path, extra_args=_args_list(cfg, target, ctx_size))
     ok, msg = engine.start(params)
     if not ok:
-        _append_log(job_id, f"  [{tag}] {label} 启动失败: {msg}")
+        _append_log(job_id, L("tune.log.run_fail", tag=tag, label=label, err=msg))
         return None
     if not _wait_ready(executor, target):
-        _append_log(job_id, f"  [{tag}] {label} 启动超时(可能显存不足)")
+        _append_log(job_id, L("tune.log.run_timeout", tag=tag, label=label))
         engine.stop()
         return None
     metrics = _bench_median(executor, target, ctx_size)
     engine.stop()
     time.sleep(2)
-    _append_log(job_id, f"  [{tag}] {label} → 解码{metrics['decode']} t/s, "
-                        f"预填充{metrics['prefill']} t/s, GPU {metrics['gpu_util']}%")
+    _append_log(job_id, L("tune.log.run_result", tag=tag, label=label,
+                          decode=metrics['decode'], prefill=metrics['prefill'],
+                          gpu=metrics['gpu_util']))
     return {"config": cfg, "label": label, "metrics": metrics}
 
 
@@ -392,15 +444,15 @@ def _coarse_search(executor, target, engine, model_path, ctx_size,
                 if _fits_vram(cfg, model_size_gb, ctx_size, gpu_vram_gb):
                     out.append(cfg)
                 else:
-                    _append_log(job_id, f"  跳过(显存不足): {_cfg_label(cfg)}")
+                    _append_log(job_id, L("tune.log.coarse_skip", cfg=_cfg_label(cfg)))
         return out
 
     candidates = _build("all")
     if not candidates:
-        _append_log(job_id, "  全 GPU 组合均超显存，降级用 CPU 兜底(n-gpu-layers=0)")
+        _append_log(job_id, L("tune.log.coarse_cpu"))
         candidates = _build("0")
 
-    _append_log(job_id, f"【阶段1 coarse】{len(candidates)} 组主导因素组合")
+    _append_log(job_id, L("tune.log.coarse_start", n=len(candidates)))
     scored = []
     for i, cfg in enumerate(candidates):
         r = _run_one(executor, target, engine, model_path, cfg, ctx_size,
@@ -413,7 +465,7 @@ def _coarse_search(executor, target, engine, model_path, ctx_size,
         return None
     scored.sort(key=lambda x: x["score"], reverse=True)
     best = scored[0]
-    _append_log(job_id, f"  coarse 最优: {best['label']} (分 {best['score']})")
+    _append_log(job_id, L("tune.log.coarse_best", label=best['label'], score=best['score']))
     return best
 
 
@@ -434,15 +486,16 @@ def _fine_search(executor, target, engine, model_path, ctx_size,
     spec_on = current.get("spec-type") != "off"
     tune_params = ["batch-size", "ubatch-size", "threads"]
     if spec_on:
-        tune_params += ["spec-draft-n-max", "spec-draft-n-min"]
+        tune_params += ["spec-draft-n-max", "spec-draft-n-min", "spec-draft-p-min"]
 
-    _append_log(job_id, f"【阶段2 fine】坐标下降，调 {tune_params}")
+    _append_log(job_id, L("tune.log.fine_start", params=tune_params))
     for param in tune_params:
         options = CONTINUOUS_GRID.get(param, [])
         improved = True
         while improved:
             improved = False
-            cur_val = int(best["config"].get(param, options[0]))
+            # 按数值取值：spec-draft-p-min 是浮点，int() 会把 0.8 压成 0
+            cur_val = _parse_num(best["config"].get(param, options[0]))
             idx = options.index(cur_val) if cur_val in options else 0
             # 向两侧各探一步
             for ni in (idx - 1, idx + 1):
@@ -460,9 +513,10 @@ def _fine_search(executor, target, engine, model_path, ctx_size,
                 if r["score"] > best["score"]:
                     best = r
                     improved = True
-                    _append_log(job_id, f"    ✓ 改善: {param}={options[ni]} 分→{r['score']}")
+                    _append_log(job_id, L("tune.log.fine_improved", param=param,
+                                          value=options[ni], score=r['score']))
                     break
-    _append_log(job_id, f"  fine 收敛: {best['label']} (分 {best['score']})")
+    _append_log(job_id, L("tune.log.fine_done", label=best['label'], score=best['score']))
     return best
 
 
@@ -475,17 +529,19 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
     baseline_cfg：用户原始参数（dict），作为基线先测一组对比。
     model_size_gb：模型大小，用于显存预检；缺省按 0 跳过预检。
     """
+    # 后台线程不继承请求上下文，先捕获发起时的界面语言，进 worker 再设回去
+    lang = get_lang()
     target = get_target(target_id)
     if not target:
-        return {"ok": False, "message": "目标机器不存在"}
+        return {"ok": False, "message": L("tune.err.no_target")}
     if not target.engine_path:
-        return {"ok": False, "message": "未配置推理引擎，请先在设置中安装"}
+        return {"ok": False, "message": L("tune.err.no_engine")}
     if getattr(target, "engine_type", "llama_cpp") != "llama_cpp":
-        return {"ok": False, "message": "自动调优目前仅支持 llama.cpp 引擎（vLLM 参数体系不同，暂不支持）"}
+        return {"ok": False, "message": L("tune.err.llama_only")}
     if not target.models_dir or not model:
-        return {"ok": False, "message": "未选择模型或模型目录为空"}
+        return {"ok": False, "message": L("tune.err.no_model")}
     if ctx_size < 1024:
-        return {"ok": False, "message": "ctx-size 过小，请至少 1024"}
+        return {"ok": False, "message": L("tune.err.ctx_small")}
 
     job_id = uuid.uuid4().hex[:8]
     with _LOCK:
@@ -499,6 +555,7 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
     def _worker():
         nonlocal model_size_gb
         executor = None
+        set_lang(lang)
         try:
             from .executor import make_executor
             from .collectors import path_join
@@ -506,8 +563,8 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
             engine = LlamaCppAdapter(executor, target)
 
             if not engine.check_installed():
-                _fail(job_id, "目标机未检测到推理引擎，请先一键安装")
-                _append_log(job_id, "✗ 未检测到推理引擎")
+                _fail(job_id, L("tune.fail.engine_missing"))
+                _append_log(job_id, L("tune.log.no_engine"))
                 return
 
             model_path = path_join(target, target.models_dir, model)
@@ -516,14 +573,14 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
             gpu_vram_gb = _get_gpu_vram(executor, target)
             if model_size_gb <= 0:
                 model_size_gb = _get_model_size_gb(executor, target, model_path)
-            _append_log(job_id, f"目标机显存: {gpu_vram_gb:.1f} GB | 模型: {model} "
-                                f"({model_size_gb:.1f} GB) | ctx 固定 {ctx_size} | 目标: "
-                                f"{GOAL_LABELS.get(goal, goal)}")
+            _append_log(job_id, L("tune.log.hw", vram=f"{gpu_vram_gb:.1f}", model=model,
+                                  size=f"{model_size_gb:.1f}", ctx=ctx_size,
+                                  goal=goal_label(goal)))
             all_results = []
 
             # 基线：用户原始参数先测一遍
             if baseline_cfg:
-                _append_log(job_id, "【基线】测试你当前配置")
+                _append_log(job_id, L("tune.log.baseline_test"))
                 b = _run_one(executor, target, engine, model_path, baseline_cfg,
                              ctx_size, job_id, "baseline")
                 if b:
@@ -531,14 +588,14 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
                     all_results.append(b)
                     with _LOCK:
                         _JOBS[job_id]["baseline"] = b
-                    _append_log(job_id, f"  基线分: {b['score']}")
+                    _append_log(job_id, L("tune.log.baseline_score", score=b['score']))
 
             # 阶段一 coarse
             coarse_best = _coarse_search(executor, target, engine, model_path,
                                          ctx_size, model_size_gb, gpu_vram_gb,
                                          goal, job_id)
             if not coarse_best:
-                _fail(job_id, "coarse 阶段无可用配置（可能显存不足）")
+                _fail(job_id, L("tune.fail.no_config"))
                 with _LOCK:
                     _JOBS[job_id]["results"] = all_results
                 return
@@ -555,7 +612,7 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
             _finalize(job_id, all_results, final_best)
         except Exception as e:
             _fail(job_id, str(e))
-            _append_log(job_id, f"✗ 异常: {e}")
+            _append_log(job_id, L("tune.log.exception", err=e))
         finally:
             try:
                 if executor:
@@ -617,11 +674,11 @@ def _finalize(job_id: str, results: List[dict], best: dict):
         job["results"] = results
         job["best"] = best
         _tid, _model, _ctx = job["target_id"], job["model"], job["ctx_size"]
-    _append_log(job_id, f"✓ 调优完成，推荐: {best['label']} (分 {best['score']})")
+    _append_log(job_id, L("tune.log.done", label=best['label'], score=best['score']))
     # 落盘最近调优参数，供部署页作为默认参数回填
     try:
         from .tune_history import save_latest
         save_latest(_tid, _model, _ctx, best.get("config", {}),
                     source="tuner", score=best.get("score", 0))
     except Exception as e:
-        _append_log(job_id, f"  ⚠ 调优结果落盘失败: {e}")
+        _append_log(job_id, L("tune.log.save_fail", err=e))
