@@ -445,8 +445,10 @@ def _install_macos(executor: Executor, job_id: str, target: Target) -> str:
 
 def _nix_download_cmd(url: str, path: str) -> str:
     """类 Unix 下载命令（curl 优先、wget 兜底，都带失败即退出）"""
-    return (f"curl -fL --retry 3 --retry-delay 2 -o '{path}' '{url}' "
-            f"|| wget -O '{path}' '{url}'")
+    # 路径用双引号：既允许 $HOME 等变量展开，又能防路径含空格；
+    # URL 用单引号：URL 常含 & ? 等 shell 元字符，单引号最安全（见 issue #4）
+    return (f"curl -fL --retry 3 --retry-delay 2 -o \"{path}\" '{url}' "
+            f"|| wget -O \"{path}\" '{url}'")
 
 
 def _nix_find_server(executor: Executor, root: str) -> str:
@@ -519,7 +521,7 @@ def _install_linux(executor: Executor, job_id: str, target: Target) -> str:
         _append_log(job_id, "  " + L("install.package_name", name=picked["primary"]["name"]))
         _run_step(executor, job_id, _nix_download_cmd(picked["primary"]["url"], tgz),
                   L("install.download_pkg"), timeout=900, check=True)
-        _run_step(executor, job_id, f"tar -xzf '{tgz}' -C {install_dir}",
+        _run_step(executor, job_id, f'tar -xzf "{tgz}" -C "{install_dir}"',
                   L("install.unzip"), check=True)
         exe = _nix_find_server(executor, install_dir)
         if exe:
