@@ -75,13 +75,13 @@ Full setup (venv, production build, configuration) is in [Getting Started](#gett
 
 - **Unified target management**: add the local machine or remote LAN machines (SSH, key or password), auto-detect the OS, and configure the inference engine and model directory.
 - **Hardware detection & model recommendation**: probe the target's GPU / VRAM / CPU / RAM and recommend models that actually fit.
-- **Model store**: a curated built-in GGUF catalog, plus dynamic fetching of popular models from HuggingFace; three download sources (hf-mirror, ModelScope, HuggingFace), background downloads with progress, and integrity checks after download.
-- **One-click deployment**: start / stop inference services (llama.cpp, vLLM) with manually tweakable runtime parameters; when the engine is missing on the target, install it in one click (auto download / compile / pip and back-fill the path).
+- **Model store**: a curated catalog of text, image and video models, plus dynamic fetching of popular models from HuggingFace. Filter by category (text / image / video, with live per-category counts), by "fits this machine", or by keyword. Every card shows the concrete version, parameter count, precision, output resolution, sampler settings and the actual weight filenames, not just a display name, with descriptions in both Chinese and English. Three download sources (hf-mirror, ModelScope, HuggingFace), background downloads with progress, and integrity checks after download.
+- **One-click deployment**: start / stop inference services (llama.cpp, vLLM, SGLang) with manually tweakable runtime parameters; when the engine is missing on the target, install it in one click (auto download / compile / pip and back-fill the path). On Linux the llama.cpp build is picked per GPU backend (CUDA / ROCm / Vulkan / CPU), and AMD GPUs are detected rather than mistaken for "no GPU".
 - **Real-time monitoring**: push GPU utilization, VRAM, throughput, and latency curves live over WebSocket.
 - **Smart tuning**:
   - *Auto tuning*: two-phase parameter search (coarse over high-impact discrete params + fine over continuous params), with VRAM feasibility pre-checks and reliable benchmarking, optimizing for latency / throughput / prefill targets.
   - *AI Agent tuning*: plug in your own LLM API and let the model reason out parameters from hardware / model / scenario, feeding benchmark results back for multi-round iterative optimization.
-- **Image / video generation (ComfyUI)**: text-to-video, storyboard generation, long-video per-shot I2V serial generation and stitching, single-image and finished-video AI upscaling, with finished clips previewable directly from the control side.
+- **Image / video generation (ComfyUI)**: text-to-image (Qwen-Image, FLUX.1 dev / schnell, SDXL, SD 3.5 and friends) and text-to-video, storyboard generation, long-video per-shot I2V serial generation and stitching, single-image and finished-video AI upscaling, with results previewable directly from the control side. Prompts can be written by hand or expanded by an LLM first — the same AI prompt-enhancement switch as the video panel.
 
 ## Tech Stack
 
@@ -89,7 +89,7 @@ Full setup (venv, production build, configuration) is in [Getting Started](#gett
 | --- | --- |
 | Backend | Python · FastAPI · Uvicorn · WebSockets · httpx |
 | Frontend | React 18 · Vite 5 · Tailwind CSS · Recharts |
-| Inference engines | llama.cpp (GGUF) · vLLM (safetensors) · ComfyUI (image / video) |
+| Inference engines | llama.cpp (GGUF) · vLLM (safetensors) · SGLang (safetensors) · ComfyUI (image / video) |
 | Remote execution | SSH (key / password) · SFTP |
 
 ## Architecture
