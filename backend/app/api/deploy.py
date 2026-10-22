@@ -203,7 +203,16 @@ def get_video_file(target_id: str, filename: str, subfolder: str = ""):
         raise HTTPException(status_code=404, detail=L("deploy.clip_not_found"))
 
     low = filename.lower()
-    media = "video/webm" if low.endswith(".webm") else "video/mp4"
+    if low.endswith(".png"):
+        media = "image/png"
+    elif low.endswith((".jpg", ".jpeg")):
+        media = "image/jpeg"
+    elif low.endswith(".webp"):
+        media = "image/webp"
+    elif low.endswith(".webm"):
+        media = "video/webm"
+    else:
+        media = "video/mp4"
     return Response(content=data, media_type=media,
                     headers={"Cache-Control": "no-store"})
 
@@ -301,6 +310,169 @@ class VideoGenerateRequest(BaseModel):
     # TeaCache 采样加速：跳过相邻冗余去噪步。实测约 1.3-3× 提速（视步数）。
     teacache: bool = False
     teacache_thresh: float = 0.15
+
+
+class ImageGenerateRequest(BaseModel):
+    target_id: str
+    prompt: str
+    # 模型文件名。checkpoint 时是 checkpoints 里的 ckpt 名（如
+    # RealVisXL_V4.0.safetensors）；unet 时是 diffusion_models 里的权重名
+    # （如 qwen_image_2.1_int8_convrot.safetensors），由 loader 字段区分。
+    # 留空则由后端按 loader 取对应列表的第一个。
+    model_name: str = ""
+    loader: str = "checkpoint"  # checkpoint | unet
+    clip_name: str = ""         # loader=unet 时必填（Qwen-Image 的文本编码器）
+    vae_name: str = ""          # loader=unet 时必填
+    negative_prompt: str = ""
+    width: int = 1024
+    height: int = 1024
+    steps: int = 25
+    cfg: float = 6.0
+    seed: Optional[int] = None
+    sampler: str = "dpmpp_2m"
+    scheduler: str = "karras"
+    # 与视频页同款「AI 智能编排」开关：提交前先把口语描述扩写成提示词。
+    enhance: bool = False
+
+
+@router.get("/image-models")
+def list_image_models(target_id: str):
+    """列出目标机 ComfyUI 上所有能拿来文生图的模型，合成一份清单。
+
+    两个来源，对应两条加载链路：
+      1. checkpoints 目录（SD/SDXL，自带 CLIP+VAE）→ CheckpointLoaderSimple；
+      2. diffusion_models 里的图片 unet（Qwen-Image 2.1 这种）→ UNETLoader
+         加独立 CLIPLoader/VAELoader，且与 MiniMax H3 视频权重共用一个目录。
+    以前只列第 1 类，用户把 qwen_image 放进 diffusion_models 后下拉框里就
+    只剩 RealVisXL，看着像"我的图片模型不见了"。每项都带 loader 字段，
+    前端据此决定提交时走哪条链路。"""
+    target, executor, engine = _adapter(target_id)
+    try:
+        if not hasattr(engine, "list_checkpoints"):
+            return {"models": [], "count": 0, "error": L("deploy.engine_no_image")}
+        if not engine.is_running():
+            return {"models": [], "count": 0, "error": L("deploy.comfyui_not_running")}
+
+        models = []
+        for n in engine.list_checkpoints():
+            models.append({"filename": n, "name": n.rsplit(".", 1)[0],
+                           "loader": "checkpoint"})
+        try:
+            # 延迟导入：这两条 unet 辅助函数只在图片场景用，放函数内可避免
+            # 顶部 import 漏写导致的 NameError 被下面的兜底 except 静默吞掉。
+            from ..services import comfyui_image as comfy_image
+            unets = comfy_image.list_unets(engine)
+            if unets:
+                clips = comfy_image.list_clips(engine)
+                vaes = comfy_image.list_vaes(engine)
+                for n in unets:
+                    if not comfy_image.is_image_unet(n):
+                        continue  # 视频 unet 不混进图片下拉框
+                    pair = comfy_image.pair_for(n, clips, vaes)
+                    if not pair:
+                        continue  # 配不齐 CLIP/VAE 的权重选了也会报错
+                    models.append({"filename": n, "name": n.rsplit(".", 1)[0],
+                                   "loader": "unet",
+                                   "clip_name": pair[0], "vae_name": pair[1]})
+        except Exception:
+            pass  # unet 探测失败不影响 checkpoint 那份清单
+        return {"models": models, "count": len(models)}
+    finally:
+        executor.close()
+
+
+@router.post("/image")
+def generate_image(req: ImageGenerateRequest):
+    """向 ComfyUI 提交一次 text-to-image，返回 prompt_id。
+
+    两条链路按 req.loader 分流：checkpoint（SD/SDXL，自带 CLIP+VAE）走
+    CheckpointLoaderSimple；unet（Qwen-Image 这种只有 UNET 的权重）走
+    UNETLoader + CLIPLoader + VAELoader，clip/vae 由前端从 /image-models
+    原样带回。req.enhance 与视频页同一个语义：提交前先把口语描述扩写成
+    提示词，LLM 不可用时静默降级为原 prompt，绝不阻断出图。
+
+    提交后由前端轮询 /generate/progress 取成图路径（SaveImage 输出同样在
+    images 字段，progress 逻辑通用）。仅 engine_type=comfyui 的 Target 可用。"""
+    target, executor, engine = _adapter(req.target_id)
+    try:
+        if not hasattr(engine, "build_image_workflow"):
+            return {"success": False, "message": L("deploy.engine_no_image")}
+        if not engine.is_running():
+            return {"success": False, "message": L("deploy.comfyui_not_running")}
+
+        prompt = req.prompt
+        enhanced = False
+        final_prompt = ""
+        reasoning = ""
+        if req.enhance:
+            try:
+                from ..services.image_prompt import enhance_prompt as enhance_image
+                got = enhance_image(req.prompt)
+                if got and got.get("prompt"):
+                    prompt = got["prompt"]
+                    final_prompt = prompt
+                    reasoning = got.get("reasoning", "")
+                    enhanced = True
+                else:
+                    # 说明为什么没编排：前端据此提示，而不是静默假装成功
+                    reasoning = L("deploy.enhance_unavailable")
+            except Exception:
+                reasoning = L("deploy.enhance_unavailable")
+
+        model = req.model_name
+        if req.loader == "unet":
+            from ..services.comfyui_image import (
+                build_unet_image_workflow, list_unets, list_clips, list_vaes, resolve_name)
+            # 前端下拉框里显示的可能是不带扩展名的显示名（localStorage 里也会
+            # 缓存这种），而 ComfyUI 只认完整文件名，差一个 .safetensors 就会被
+            # 值校验整单拒掉。这里统一归一到列表里的真名。
+            model = resolve_name(model, list_unets(engine))
+            req.clip_name = resolve_name(req.clip_name, list_clips(engine))
+            req.vae_name = resolve_name(req.vae_name, list_vaes(engine))
+            if not model:
+                return {"success": False, "message": L("deploy.no_image_model")}
+            if not req.clip_name or not req.vae_name:
+                # 缺 CLIP/VAE 就没法组链路，让前端重新拉一次模型列表
+                return {"success": False, "message": L("deploy.no_image_model")}
+            wf = build_unet_image_workflow(
+                prompt=prompt,
+                unet_name=model,
+                clip_name=req.clip_name,
+                vae_name=req.vae_name,
+                negative_prompt=req.negative_prompt or "",
+                width=req.width,
+                height=req.height,
+                steps=req.steps,
+                cfg=req.cfg,
+                seed=req.seed,
+            )
+        else:
+            if not model:
+                names = engine.list_checkpoints()
+                if not names:
+                    return {"success": False, "message": L("deploy.no_image_model")}
+                model = names[0]
+            wf = engine.build_image_workflow(
+                prompt=prompt,
+                ckpt_name=model,
+                negative_prompt=req.negative_prompt or "",
+                width=req.width,
+                height=req.height,
+                steps=req.steps,
+                cfg=req.cfg,
+                seed=req.seed,
+                sampler=req.sampler,
+                scheduler=req.scheduler,
+            )
+        ok, result = engine.submit_workflow(wf)
+        if not ok:
+            return {"success": False, "message": result}
+        return {"success": True, "prompt_id": result, "model": model,
+                "loader": req.loader, "enhanced": enhanced,
+                "final_prompt": final_prompt, "reasoning": reasoning,
+                "message": L("deploy.task_submitted")}
+    finally:
+        executor.close()
 
 
 @router.post("/generate")

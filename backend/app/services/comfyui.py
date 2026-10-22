@@ -202,10 +202,14 @@ class ComfyUIAdapter(EngineAdapter):
             return False, L("comfyui.workflow_write_fail")
 
         url = f"{self._base_url()}/prompt"
+        # --data-binary 而不是 --data：--data 会按 curl 的规则处理换行与 @，
+        # 中文/多行 prompt 经远端 curl 时容易被改写，导致 ComfyUI 侧收到
+        # 与本地不同的节点图。charset 显式写明，避免 Windows 侧按本地代码页解析。
+        ctype = "Content-Type: application/json; charset=utf-8"
         if self.target.os == "windows":
-            cmd = f'curl -s --max-time 30 -X POST "{url}" -H "Content-Type: application/json" --data "@{tmp}"'
+            cmd = f'curl -s --max-time 30 -X POST "{url}" -H "{ctype}" --data-binary "@{tmp}"'
         else:
-            cmd = f"curl -s --max-time 30 -X POST {shlex.quote(url)} -H 'Content-Type: application/json' --data @{shlex.quote(tmp)}"
+            cmd = f"curl -s --max-time 30 -X POST {shlex.quote(url)} -H '{ctype}' --data-binary @{shlex.quote(tmp)}"
         result = self.executor.run(cmd, timeout=35)
         out = (result.stdout or "").strip()
         try:
@@ -214,9 +218,16 @@ class ComfyUIAdapter(EngineAdapter):
             return False, L("comfyui.submit_unparsable", err=out[:300])
         if "prompt_id" in data:
             return True, data["prompt_id"]
-        # ComfyUI 校验失败会返回 error 详情
-        err = data.get("error") or data
-        return False, L("comfyui.workflow_rejected", err=json.dumps(err, ensure_ascii=False)[:400])
+        # 校验失败时真正的定位信息在 node_errors（哪个节点、哪个输入、期望什么），
+        # 只回 error.message 等于把线索扔掉。这里连 node_errors 一起透出。
+        err = data.get("error")
+        if not isinstance(err, dict):
+            err = {"error": err} if err is not None else {}
+        if data.get("node_errors"):
+            err["node_errors"] = data["node_errors"]
+        if not err:
+            err = data
+        return False, L("comfyui.workflow_rejected", err=json.dumps(err, ensure_ascii=False)[:800])
 
     def get_history(self, prompt_id: str) -> Optional[dict]:
         """查询任务历史；任务完成后 outputs 里含产物（视频/图片）文件信息。"""
@@ -412,6 +423,73 @@ class ComfyUIAdapter(EngineAdapter):
             wf["126"]["inputs"]["model"] = ["145", 0]
             wf["124"]["inputs"]["model"] = ["145", 0]
         return wf
+
+    # ==================== 文生图 workflow（SD / SDXL checkpoint） ====================
+
+    def list_checkpoints(self) -> list:
+        """列出目标机 ComfyUI checkpoints 目录里的图片模型（SD/SDXL 主权重）。
+
+        直接问 ComfyUI 的 /object_info/CheckpointLoaderSimple——它返回的就是
+        加载器实际能识别到的 ckpt_name 列表，比自己猜目录结构可靠（用户可能
+        用 extra_model_paths.yaml 挂多个目录）。
+        """
+        info = self._curl_json("/object_info/CheckpointLoaderSimple", timeout=15)
+        if not info:
+            return []
+        try:
+            opts = info["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+        except (KeyError, IndexError, TypeError):
+            return []
+        return [o for o in opts if isinstance(o, str)]
+
+    def build_image_workflow(
+        self,
+        prompt: str,
+        ckpt_name: str,
+        negative_prompt: str = "",
+        width: int = 1024,
+        height: int = 1024,
+        steps: int = 25,
+        cfg: float = 6.0,
+        seed: Optional[int] = None,
+        sampler: str = "dpmpp_2m",
+        scheduler: str = "karras",
+        filename_prefix: str = "modeldeploy/image",
+    ) -> dict:
+        """构建 SD / SDXL 文生图 ComfyUI API prompt（扁平格式）。
+
+        链路：CheckpointLoaderSimple → CLIPTextEncode(正/负) → EmptyLatentImage
+        → KSampler → VAEDecode → SaveImage。
+
+        与视频链的区别：视频模型（H3）是 UNETLoader + 专用 MiniMaxH3* 节点，
+        而图片 checkpoint（如 RealVisXL）自带 CLIP 与 VAE，走 CheckpointLoaderSimple
+        一次加载三件套（MODEL=0 / CLIP=1 / VAE=2），节点完全不同，不能复用视频模板。
+
+        ckpt_name 须是 ComfyUI checkpoints 里的真实文件名（见 list_checkpoints）。
+        SDXL 原生分辨率 1024×1024，steps 25 / cfg 6 是 SDXL 的稳妥起点；
+        SD1.5 建议 512×512、cfg 7、采样器 dpmpp_2m + karras。
+        """
+        sd = seed if seed is not None else int(uuid.uuid4().int % (2 ** 32 - 1))
+        return {
+            "300": {"class_type": "CheckpointLoaderSimple",
+                    "inputs": {"ckpt_name": ckpt_name}},
+            "301": {"class_type": "CLIPTextEncode",
+                    "inputs": {"text": prompt, "clip": ["300", 1]}},
+            "302": {"class_type": "CLIPTextEncode",
+                    "inputs": {"text": negative_prompt, "clip": ["300", 1]}},
+            "303": {"class_type": "EmptyLatentImage",
+                    "inputs": {"width": int(width), "height": int(height), "batch_size": 1}},
+            "304": {"class_type": "KSampler",
+                    "inputs": {"model": ["300", 0], "positive": ["301", 0],
+                               "negative": ["302", 0], "latent_image": ["303", 0],
+                               "seed": sd, "steps": int(steps), "cfg": float(cfg),
+                               "sampler_name": sampler, "scheduler": scheduler,
+                               "denoise": 1.0}},
+            "305": {"class_type": "VAEDecode",
+                    "inputs": {"samples": ["304", 0], "vae": ["300", 2]}},
+            "306": {"class_type": "SaveImage",
+                    "inputs": {"images": ["305", 0], "filename_prefix": filename_prefix}},
+        }
 
     def build_upscale_workflow(
         self,

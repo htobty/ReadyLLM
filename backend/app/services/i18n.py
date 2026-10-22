@@ -360,6 +360,14 @@ MESSAGES = {
         "zh": "当前引擎不支持超分，请改用 ComfyUI",
         "en": "The current engine does not support upscaling - switch to ComfyUI",
     },
+    "deploy.engine_no_image": {
+        "zh": "当前引擎不支持图片生成，请改用 ComfyUI",
+        "en": "The current engine does not support image generation - switch to ComfyUI",
+    },
+    "deploy.no_image_model": {
+        "zh": "目标机 ComfyUI 的 checkpoints 里没有可用的图片模型（SD/SDXL）",
+        "en": "No image model (SD/SDXL) found in the target machine's ComfyUI checkpoints",
+    },
     "deploy.comfyui_not_running": {
         "zh": "ComfyUI 服务未运行，请先在部署页启动",
         "en": "ComfyUI is not running - start it from the Deploy page first",

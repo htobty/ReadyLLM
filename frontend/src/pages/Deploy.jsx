@@ -1,27 +1,35 @@
 import { useState, useEffect, useRef } from 'react'
 import { IconRefresh, IconPlay, IconStop, IconRocket } from '../components/Icons'
 import LongVideoDeploy from './LongVideoDeploy'
+import ImageGenPanel from '../components/ImageGenPanel'
 import { useI18n } from '../i18n/I18nContext'
+
+const COMFY_MODES = [
+  ['short', 'deploy.shortVideo'],
+  ['long', 'deploy.longVideo'],
+  ['image', 'deploy.imageGen'],
+]
 
 export default function Deploy({ targetId, target }) {
   const { t } = useI18n()
   const isVideo = target?.engine_type === 'comfyui'
-  const [videoMode, setVideoMode] = useState('short') // short | long
+  // short=文生视频 long=长视频 image=文生图（checkpoint 链路，与 H3 视频链路互不通用）
+  const [videoMode, setVideoMode] = useState('short')
   if (!isVideo) return <TextDeploy targetId={targetId} target={target} />
   return (
     <div>
       <div className="inline-flex gap-1 p-1 rounded-lg bg-card border border-gray/30 mb-6">
-        {[['short', t('deploy.shortVideo')], ['long', t('deploy.longVideo')]].map(([k, label]) => (
+        {COMFY_MODES.map(([k, labelKey]) => (
           <button key={k} onClick={() => setVideoMode(k)}
             className={`px-4 py-1.5 rounded-md text-sm transition ${
               videoMode === k ? 'bg-blue text-bg font-semibold' : 'text-gray hover:text-fg'}`}>
-            {label}
+            {t(labelKey)}
           </button>
         ))}
       </div>
-      {videoMode === 'short'
-        ? <VideoDeploy targetId={targetId} target={target} />
-        : <LongVideoDeploy targetId={targetId} target={target} />}
+      {videoMode === 'short' && <VideoDeploy targetId={targetId} target={target} />}
+      {videoMode === 'long' && <LongVideoDeploy targetId={targetId} target={target} />}
+      {videoMode === 'image' && <ImageGenPanel targetId={targetId} t={t} />}
     </div>
   )
 }
