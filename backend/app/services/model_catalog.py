@@ -316,3 +316,274 @@ def filter_by_vram(vram_gb: float, source: str = DEFAULT_SOURCE,
     return [m.to_dict(source) for m in CATALOG
             if m.min_vram_gb <= vram_gb
             and (category is None or m.category == category)]
+
+
+
+# ---------------------------------------------------------------------------
+# 图片模型精选清单
+#
+# 图片模型和文本/视频模型在磁盘布局上不一样：文本模型是单个 GGUF 文件，
+# 视频模型是单个 safetensors，而图片模型通常拆成 unet/clip/vae 三段。
+# 所以这里单独维护一份 dict 清单，字段与前端 ModelCard 对齐，并额外给出
+# loader 信息（checkpoint / unet），下载时按 loader 决定落到哪个目录。
+# ---------------------------------------------------------------------------
+IMAGE_MODELS: List[dict] = [
+    {
+        "id": "img-qwen-image",
+        "name": "Qwen-Image",
+        "quant": "BF16",
+        "desc": "阿里通义千问的图像生成模型，中英双语文字渲染强，适合海报、带字图、写实照片。",
+        "size_gb": 41.0,
+        "min_vram_gb": 20.0,
+        "filename": "qwen_image_2.1_int8_convrot.safetensors",
+        "loader": "unet",
+        "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+        "vae_name": "qwen_image_2.1_vae_bf16.safetensors",
+        "category": "image",
+        "engine": "comfyui",
+        "repo": "Qwen/Qwen-Image",
+        "tags": ["image", "qwen", "t2i", "text-render"],
+        "available_sources": ["hf-mirror", "modelscope", "huggingface"],
+        "steps": 20,
+        "cfg": 2.5,
+    },
+    {
+        "id": "img-flux-dev",
+        "name": "FLUX.1-dev",
+        "quant": "BF16",
+        "desc": "Black Forest Labs 的 12B 整流流模型，构图与提示词跟随最好，适合概念图、写实人像。",
+        "size_gb": 23.8,
+        "min_vram_gb": 16.0,
+        "filename": "flux1-dev.safetensors",
+        "loader": "unet",
+        "clip_name": "t5xxl_fp16.safetensors",
+        "vae_name": "ae.safetensors",
+        "category": "image",
+        "engine": "comfyui",
+        "repo": "black-forest-labs/FLUX.1-dev",
+        "tags": ["image", "flux", "t2i"],
+        "available_sources": ["hf-mirror", "huggingface"],
+        "steps": 25,
+        "cfg": 3.5,
+    },
+    {
+        "id": "img-flux-schnell",
+        "name": "FLUX.1-schnell",
+        "quant": "BF16",
+        "desc": "FLUX 的蒸馏版，4 步出图，速度是 dev 的五六倍，适合批量出草稿。",
+        "size_gb": 23.8,
+        "min_vram_gb": 12.0,
+        "filename": "flux1-schnell.safetensors",
+        "loader": "unet",
+        "clip_name": "t5xxl_fp16.safetensors",
+        "vae_name": "ae.safetensors",
+        "category": "image",
+        "engine": "comfyui",
+        "repo": "black-forest-labs/FLUX.1-schnell",
+        "tags": ["image", "flux", "fast", "t2i"],
+        "available_sources": ["hf-mirror", "huggingface"],
+        "steps": 4,
+        "cfg": 1.0,
+    },
+    {
+        "id": "img-realvisxl-v4",
+        "name": "RealVisXL V4.0",
+        "quant": "BF16",
+        "desc": "基于 SDXL 的写实向 checkpoint，人像与皮肤质感好，单文件加载最快。",
+        "size_gb": 6.5,
+        "min_vram_gb": 8.0,
+        "filename": "RealVisXL_V4.0.safetensors",
+        "loader": "checkpoint",
+        "category": "image",
+        "engine": "comfyui",
+        "repo": "SG161222/RealVisXL_V4.0",
+        "tags": ["image", "sdxl", "realistic", "checkpoint"],
+        "available_sources": ["hf-mirror", "huggingface"],
+        "steps": 30,
+        "cfg": 5.0,
+    },
+    {
+        "id": "img-sdxl-base",
+        "name": "SDXL Base 1.0",
+        "quant": "BF16",
+        "desc": "Stability 的 SDXL 基座，生态里 LoRA 与控制网最多，8G 显存就能跑。",
+        "size_gb": 6.9,
+        "min_vram_gb": 8.0,
+        "filename": "sd_xl_base_1.0.safetensors",
+        "loader": "checkpoint",
+        "category": "image",
+        "engine": "comfyui",
+        "repo": "stabilityai/stable-diffusion-xl-base-1.0",
+        "tags": ["image", "sdxl", "base", "checkpoint"],
+        "available_sources": ["hf-mirror", "huggingface"],
+        "steps": 30,
+        "cfg": 7.0,
+    },
+    {
+        "id": "img-sd35-large",
+        "name": "SD 3.5 Large",
+        "quant": "BF16",
+        "desc": "Stability 新一代 MMDiT，8B 参数，文字排版和复杂提示词比 SDXL 稳。",
+        "size_gb": 16.0,
+        "min_vram_gb": 16.0,
+        "filename": "sd3.5_large.safetensors",
+        "loader": "unet",
+        "clip_name": "clip_l.safetensors",
+        "vae_name": "sd3.5_vae.safetensors",
+        "category": "image",
+        "engine": "comfyui",
+        "repo": "stabilityai/stable-diffusion-3.5-large",
+        "tags": ["image", "sd3.5", "t2i"],
+        "available_sources": ["hf-mirror", "huggingface"],
+        "steps": 28,
+        "cfg": 4.5,
+    },
+]
+
+
+# 图片模型的补充规格。
+# 条目里的工程字段（filename / loader / steps / cfg）是给下载和 ComfyUI 建图用的，
+# 光靠 name 一眼看不出"这是哪个版本、多大、能出多大的图"，所以版本号、参数规模、
+# 推荐出图分辨率、真实权重精度单独列一份，由 list_images 合并进条目。
+# 精度以 filename 的实际后缀为准：qwen_image_2.1_int8_convrot 是 INT8，不是 BF16。
+IMAGE_META: dict = {
+    "img-qwen-image": {
+        "version": "2.1",
+        "params": "20B",
+        "precision": "INT8 conv-rot",
+        "resolution": "1024×1024，支持 1328×1328 等多比例",
+    },
+    "img-flux-dev": {
+        "version": "1.0-dev",
+        "params": "12B",
+        "precision": "BF16",
+        "resolution": "1024×1024，支持多比例",
+    },
+    "img-flux-schnell": {
+        "version": "1.0-schnell",
+        "params": "12B",
+        "precision": "BF16",
+        "resolution": "1024×1024，支持多比例",
+    },
+    "img-realvisxl-v4": {
+        "version": "V4.0",
+        "params": "3.5B（SDXL 架构）",
+        "precision": "BF16",
+        "resolution": "1024×1024",
+    },
+    "img-sdxl-base": {
+        "version": "1.0",
+        "params": "3.5B",
+        "precision": "BF16",
+        "resolution": "1024×1024",
+    },
+    "img-sd35-large": {
+        "version": "3.5 Large",
+        "params": "8B",
+        "precision": "BF16",
+        "resolution": "1024×1024，支持多比例",
+    },
+}
+
+# 模型描述英文版（id -> desc_en）。
+# 条目的 desc 是中文、写死在目录里；界面默认语言是英文，只给中文描述就会出现
+# 「英文界面里突然冒出一句中文」。这里按 id 补英文，前端按当前语言二选一。
+# 没列到的条目（如 HF 动态拉取的模型）前端会回退用 desc。
+DESC_EN: dict = {
+    # --- 文本 ---
+    "qwen38-27b": "Newest flagship. Native MTP speculative decoding, smooth on 24 GB.",
+    "qwen38-27b-q4km": "Flagship at the standard quant. Best compatibility.",
+    "qwen38-8b": "Small flagship with MTP speedup. Runs on 8 GB.",
+    "qwen35-32b": "Strong reasoning. Needs 24 GB.",
+    "qwen35-14b": "Balanced between quality and speed.",
+    "qwen35-8b": "Best value in the lineup.",
+    "qwen35-4b": "Light and efficient. Runs on CPU too.",
+    "llama4-scout-17b": "MoE with 17B active parameters. Multimodal.",
+    "llama4-maverick-17b": "MoE flagship, 128 experts. Needs a large GPU.",
+    "deepseek-r1-distill-32b": "Reasoning-tuned. Strong at math and code.",
+    "deepseek-r1-distill-14b": "A lighter reasoning model.",
+    "deepseek-r1-distill-8b": "Entry-level reasoning model.",
+    "gemma3-27b": "Google's multimodal model: vision plus text.",
+    "gemma3-12b": "Multimodal at a balanced size.",
+    "gemma3-4b": "Lightweight multimodal.",
+    "mistral-small-3.2": "Europe's strongest open release. Multilingual.",
+    "qwen3-coder-32b": "Strongest open coding model.",
+    "qwen3-coder-8b": "Lightweight coding model.",
+    "bge-m3": "Multilingual embedding model. A must for RAG.",
+    # --- 视频 ---
+    "wan21-t2v-1.3b": "Light text-to-video. Runs on 8 GB, 480p and up.",
+    "wan21-t2v-14b": "High-quality text-to-video flagship. Needs 24 GB or more.",
+    "ltx-video-2b": "Very fast generation on 6 GB. Good for previews.",
+    "cogvideox-5b": "Zhipu's open video model, 1280x720. Needs 16 GB.",
+    # --- 图片 ---
+    "img-qwen-image": "Alibaba's image model. Renders Chinese and English text cleanly, so it suits posters, images with captions and realistic photos.",
+    "img-flux-dev": "Black Forest Labs' 12B rectified-flow model. Best prompt following and composition; good for concept art and realistic portraits.",
+    "img-flux-schnell": "Distilled FLUX. Four steps per image, several times faster than dev; good for batches of drafts.",
+    "img-realvisxl-v4": "SDXL-based checkpoint tuned for realism. Convincing skin and portraits, and the fastest to load as a single file.",
+    "img-sdxl-base": "Stability's SDXL base. Largest ecosystem of LoRAs and ControlNets; runs on 8 GB.",
+    "img-sd35-large": "Stability's newer MMDiT, 8B parameters. Handles typography and complex prompts better than SDXL.",
+}
+
+# 模型商店的分类（文本 / 图片 / 视频），前端筛选栏按这个顺序渲染
+STORE_CATEGORIES: List[dict] = [
+    {"key": "all", "label_en": "All", "label_zh": "全部"},
+    {"key": "text", "label_en": "Text", "label_zh": "文本"},
+    {"key": "image", "label_en": "Image", "label_zh": "图片"},
+    {"key": "video", "label_en": "Video", "label_zh": "视频"},
+]
+
+
+def list_images(source: str = DEFAULT_SOURCE) -> List[dict]:
+    """列出图片模型（按下载源过滤可用性）。
+
+    额外把 IMAGE_META 里的版本/参数量/精度/出图分辨率合并进条目，
+    并让 quant 与真实权重精度保持一致（避免出现标 BF16、文件却是 INT8 的情况）。
+    """
+    out = []
+    for m in IMAGE_MODELS:
+        item = dict(m)
+        item.update(IMAGE_META.get(m["id"], {}))
+        if item.get("precision"):
+            item["quant"] = item["precision"]
+        item["available_sources"] = list(m.get("available_sources") or [])
+        item["source_ok"] = source in item["available_sources"]
+        item["desc_en"] = DESC_EN.get(m["id"], "")
+        out.append(item)
+    return out
+
+
+def get_image_by_id(model_id: str) -> Optional[dict]:
+    """按 id 取图片模型条目（商店下载接口用）。"""
+    for m in IMAGE_MODELS:
+        if m["id"] == model_id:
+            return dict(m)
+    return None
+
+
+def list_for_store(source: str = DEFAULT_SOURCE, category: Optional[str] = None) -> List[dict]:
+    """商店统一入口：把文本、图片、视频三类的条目合成一份，带 category 字段。
+
+    category 传 None 或 "all" 时返回全部；传 "text"/"image"/"video" 时只返回该类。
+    """
+    cat = None if category in (None, "", "all") else category
+    items: List[dict] = []
+
+    # 直接遍历 CATALOG 取对象，类别以 ModelEntry.category 为准：
+    # to_dict() 不一定带 category，setdefault 会把视频模型误标成 text。
+    for entry in CATALOG:
+        item = entry.to_dict(source)
+        item["category"] = getattr(entry, "category", "text") or "text"
+        item["source_ok"] = source in (item.get("available_sources") or [])
+        item["desc_en"] = DESC_EN.get(entry.id, "")
+        items.append(item)
+
+    if cat in (None, "image"):
+        items.extend(list_images(source))
+
+    if cat is None:
+        # 视频模型已由 list_all 从 CURATED 中带出（其 category="video"）
+        pass
+
+    if cat is None or cat == "all":
+        return items
+    return [m for m in items if m.get("category") == cat]

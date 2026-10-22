@@ -8,7 +8,10 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional
 
-from ..services.model_catalog import list_all, filter_by_vram, get_by_id, fetch_dynamic_catalog
+from ..services.model_catalog import (
+    list_all, filter_by_vram, get_by_id, fetch_dynamic_catalog,
+    list_for_store, get_image_by_id,
+)
 from ..services import downloader
 from ..models.target import get_target
 from ..services.executor import make_executor
@@ -28,9 +31,12 @@ def active_jobs(target_id: Optional[str] = None):
 @router.get("/models")
 def models(target_id: Optional[str] = None, source: str = "hf-mirror",
            category: Optional[str] = None):
-    """模型列表；category=text/video 按类别筛选；给定 target_id 时按该机显存
-    标注是否可跑，source 选择下载源"""
-    items = list_all(source, category)
+    """模型列表；category=text/image/video 按类别筛选（不传或 all 返回全部）；
+    给定 target_id 时按该机显存标注是否可跑，source 选择下载源。
+
+    一条目里的 category / engine / loader 字段直接供前端做分类筛选与徽章展示。
+    """
+    items = list_for_store(source, category)
     if target_id:
         target = get_target(target_id)
         vram = 0.0
@@ -48,8 +54,13 @@ def models(target_id: Optional[str] = None, source: str = "hf-mirror",
             finally:
                 executor.close()
         for it in items:
-            it["fits"] = it["min_vram_gb"] <= vram if vram > 0 else None
-    return {"models": items}
+            min_vram = it.get("min_vram_gb") or 0
+            it["fits"] = min_vram <= vram if vram > 0 else None
+    counts = {}
+    for it in items:
+        c = it.get("category") or "text"
+        counts[c] = counts.get(c, 0) + 1
+    return {"models": items, "counts": counts, "count": len(items)}
 
 
 @router.get("/refresh")
@@ -74,7 +85,25 @@ class DownloadRequest(BaseModel):
 
 @router.post("/download")
 def download(req: DownloadRequest):
-    """启动下载任务（source 选择下载源，魔搭无对应仓库自动回退镜像站）"""
+    """启动下载任务（source 选择下载源，魔搭无对应仓库自动回退镜像站）
+
+    图片模型是 unet/clip/vae 三段式，落盘目录也各不相同（diffusion_models /
+    text_encoders / vae），不能按单个 GGUF 文件下载，这里明确拒绝并说明做法，
+    避免前端出现「点了没反应」或下到错目录的文件。
+    """
+    if req.model_id.startswith("img-"):
+        entry = get_image_by_id(req.model_id)
+        repo = (entry or {}).get("repo") or "对应 HuggingFace 仓库"
+        return {
+            "ok": False,
+            "code": "image_model_manual",
+            "repo": repo,
+            "message": (
+                f"图片模型需要 unet/clip/vae 三段文件，请到 ComfyUI 里安装："
+                f"在 ComfyUI Manager 搜索该模型，或从 {repo} 手动下载后放到 "
+                f"diffusion_models / text_encoders / vae 目录。"
+            ),
+        }
     return downloader.start_download(req.target_id, req.model_id, req.source)
 
 
