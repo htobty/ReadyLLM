@@ -17,10 +17,14 @@
 无引擎/无模型时明确报错，绝不返回模拟数据。
 """
 
+import os
+import re
+import shlex
 import threading
 import time
 import json
 import uuid
+from dataclasses import dataclass
 from statistics import median
 from typing import Optional, List, Dict
 
@@ -186,28 +190,328 @@ def _args_list(cfg: dict, target: Target, ctx_size: int) -> List[str]:
 # KV cache 量化每元素字节数
 _CACHE_BYTES = {"f16": 2.0, "q8_0": 1.0, "q4_0": 0.5}
 
+_GGUF_META_SCRIPT = (
+    "import struct,sys\n"
+    "p=sys.argv[1]\n"
+    "try:\n"
+    " f=open(p,'rb'); d=f.read(1<<20); f.close()\n"
+    " if len(d)<24 or d[:4]!=b'GGUF': print('NONE'); sys.exit(0)\n"
+    " nkv=struct.unpack_from('<Q',d,16)[0]; off=24\n"
+    " bt=bd=bl=None\n"
+    " def cstr(o):\n"
+    "  e=d.index(b'\\x00',o); return d[o:e].decode('utf-8','replace'),e+1\n"
+    " for i in range(nkv):\n"
+    "  k,off=cstr(off); vt=struct.unpack_from('<I',d,off)[0]; off+=4\n"
+    "  if vt==4:\n"
+    "   v,off=cstr(off)\n"
+    "   if k=='general.architecture': arch=v\n"
+    "  elif vt==1:\n"
+    "   v=struct.unpack_from('<q',d,off)[0]; off+=8\n"
+    "   if k=='general.n_layer': bl=v\n"
+    "  elif vt==0:\n"
+    "   v=struct.unpack_from('<i',d,off)[0]; off+=4\n"
+    "   if k=='general.hidden_size': hid=v\n"
+    "   elif k=='attention.head_count': hc=v\n"
+    "   elif k=='attention.kv_head_count': khc=v\n"
+    "  elif vt==2:\n"
+    "   v=struct.unpack_from('<f',d,off)[0]; off+=4\n"
+    "  elif vt==5:\n"
+    "   et=struct.unpack_from('<I',d,off)[0]; off+=4\n"
+    "   n=struct.unpack_from('<Q',d,off)[0]; off+=8\n"
+    "   if k=='attention.pattern' and et==1:\n"
+    "    bt=[struct.unpack_from('<q',d,off+j*8)[0] for j in range(n)]; off+=n*8\n"
+    "   else:\n"
+    "    ok=True\n"
+    "    for _ in range(n):\n"
+    "     if et==4:\n"
+    "      _,off=cstr(off)\n"
+    "     elif et==1: off+=8\n"
+    "     elif et==2: off+=4\n"
+    "     elif et in (0,6,8): off+=4\n"
+    "     elif et in (7,9): off+=2\n"
+    "     elif et==3: off+=1\n"
+    "     else: ok=False; break\n"
+    "    if not ok: break\n"
+    "   continue\n"
+    "  else:\n"
+    "   if vt==3: off+=1\n"
+    "   elif vt in (6,8): off+=1\n"
+    "   elif vt in (7,9): off+=2\n"
+    "   else: break\n"
+    " print(f'ARCH={arch} BLOCKS={bl} PATTERN={bt} HIDDEN={hid} HC={hc} KHC={khc}')\n"
+    "except Exception:\n"
+    " print('NONE')\n"
+)
 
-def _estimate_vram_gb(model_size_gb: float, ctx_size: int,
-                      cache_type: str, kv_heads_dim: int = 8192) -> float:
-    """粗估显存占用 GB：权重 + KV cache。
-    kv_heads_dim 为 KV 维度近似（hidden*n_heads 量级），27B 级约 8192。
-    权重全进 GPU（n-gpu-layers=all 场景）；CPU 兜底场景由调用方单独处理。
+
+def _read_gguf_meta(executor: Executor, target: Target, model_path: str) -> dict:
+    """读 GGUF 文件头里的模型结构元数据（不依赖 llama-gguf 工具，直接解析文件）。
+
+    返回 {"arch","blocks","pattern"}；读不到（非 GGUF / 命令失败）返回 {}。
+    混合注意力（如 Qwen 系列）的 attention.pattern 里 0=滑窗层（不存逐 token
+    KV）、-1=全注意力层——KV 缓存只占全注意力层的份额，硬编码 64 层会把
+    这类模型的显存高估 3~4 倍（这正是之前"全组合显存不足"误判的根源）。
     """
-    # KV cache: 2(K+V) * ctx * kv_dim * bytes * 层数比例近似
-    # 简化：ctx * kv_dim * cache_bytes * 2 / 1e9，再乘层数经验系数
-    kv_bytes = 2 * ctx_size * kv_heads_dim * _CACHE_BYTES.get(cache_type, 2.0)
-    # 27B 约 64 层，每层都有 KV；上面 2* 已含 K/V，这里再乘层数
-    kv_gb = kv_bytes * 64 / (1024 ** 3)
-    return model_size_gb + kv_gb
+    if target.os == "windows":
+        return {}
+    script_path = "/tmp/readyllm_gguf_meta.py"
+    if not executor.write_file(_GGUF_META_SCRIPT, script_path):
+        return {}
+    r = executor.run(f"python3 {script_path} {json.dumps(model_path)}", timeout=25)
+    line = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
+    if not line.startswith("ARCH="):
+        return {}
+    out = {}
+    for part in line[5:].split():
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        if k == "PATTERN":
+            try:
+                out["pattern"] = [int(x) for x in v.split(",") if x]
+            except ValueError:
+                pass
+        elif k == "BLOCKS":
+            try:
+                out["blocks"] = int(v)
+            except ValueError:
+                pass
+        elif k == "ARCH":
+            out["arch"] = v
+        elif k == "HIDDEN":
+            try:
+                out["hidden"] = int(v)
+            except ValueError:
+                pass
+        elif k == "HC":
+            try:
+                out["head_count"] = int(v)
+            except ValueError:
+                pass
+        elif k == "KHC":
+            try:
+                out["kv_heads"] = int(v)
+            except ValueError:
+                pass
+    return out
 
 
-def _fits_vram(cfg: dict, model_size_gb: float, ctx_size: int, gpu_vram_gb: float) -> bool:
-    """判断配置是否放得进显存；n-gpu-layers=0 视为 CPU 兜底，总能'放下'（慢）"""
+def _kv_layers_from_meta(meta: dict) -> int:
+    """从元数据算"真正存逐 token KV 的层数"；缺元数据时回退 64（旧经验值）"""
+    pattern = meta.get("pattern")
+    if pattern:
+        n = 0
+        for v in pattern:
+            if v == -1:          # 全注意力层：每 token 都存 KV
+                n += 1
+            elif isinstance(v, int) and 1 <= v <= 8:
+                n += 1           # 滑窗层：只存最后 v 个 token 的 KV，近似按 1 层计
+        if n:
+            return n
+    blocks = meta.get("blocks")
+    if blocks and blocks > 0:
+        return blocks
+    return 64
+
+
+@dataclass
+class _VRAMInfo:
+    """显存预检的全部依据：模型大小 + 显卡显存 + 模型结构元数据。
+
+    两种可靠来源：
+    1) meta 模式：GGUF 头里的层数/头数（标准 GGUF 才读得到）；
+    2) measured 模式：基线跑起来后，用真实占用的显存反推"每 token KV 字节数"
+       （measured_at_bytes > 0 表示处于此模式）——对非标准 GGUF 布局的
+       自定义模型文件，这是唯一可靠的来源。
+    """
+    model_size_gb: float = 0.0
+    gpu_vram_gb: float = 0.0
+    kv_layers: int = 64
+    kv_heads: int = 0      # 0 = 元数据里没有，按保守估算
+    kv_head_dim: int = 0
+    bytes_per_kv_token: int = 0   # 全精度(f16)下每 token 每层的 KV 字节数
+    measured_at_bytes: float = 0.0  # measured 模式：实测时用的 KV 量化字节数
+
+    @property
+    def meta_ok(self) -> bool:
+        return self.bytes_per_kv_token > 0
+
+
+def _estimate_vram_gb(vram: "_VRAMInfo", ctx_size: int, cache_type: str) -> float:
+    """按模型真实结构估算 GPU 全量占用 GB：权重 + KV cache。
+
+    meta 模式：KV = 2(K+V) × ctx × kv层数 × kv头数 × 头维度 × 量化字节数。
+    measured 模式：KV = ctx × 实测每token字节数 ×（本组量化/实测量化）。
+    两者都不可用时退回旧经验公式（kv 维度 8192 × 64 层）。
+    """
+    cache_b = _CACHE_BYTES.get(cache_type, 2.0)
+    if vram.meta_ok:
+        if vram.measured_at_bytes > 0:
+            kv_gb = (ctx_size * vram.kv_layers * vram.bytes_per_kv_token
+                     * (cache_b / vram.measured_at_bytes)) / (1024 ** 3)
+        else:
+            kv_per_layer = vram.bytes_per_kv_token * cache_b
+            kv_gb = 2 * ctx_size * vram.kv_layers * kv_per_layer / (1024 ** 3)
+    else:
+        kv_bytes = 2 * ctx_size * 8192 * cache_b
+        kv_gb = kv_bytes * 64 / (1024 ** 3)
+    return vram.model_size_gb + kv_gb
+
+
+def _fits_vram(cfg: dict, vram: "_VRAMInfo", ctx_size: int) -> bool:
+    """判断配置是否放得进显存；n-gpu-layers=0 视为 CPU 兜底，总能'放下'（慢）。
+
+    数字型 n-gpu-layers 按"每层权重均摊"估部分卸载的占用；
+    留 10% 余量给激活值/显存碎片。
+    完全估算不了（元数据读不到且没有实测校准）时不拦截、交给真实启动去验证——
+    错误的猜测式拦截（旧版硬编码 64 层）比放行更糟。
+    """
     if cfg.get("n-gpu-layers") == "0":
         return True
-    est = _estimate_vram_gb(model_size_gb, ctx_size, cfg.get("cache-type-k", "f16"))
-    # 留 10% 余量给激活值/显存碎片
-    return est <= gpu_vram_gb * 0.9
+    if not vram.gpu_vram_gb:
+        # 读不到显存信息：不拦截，交给真实启动去验证
+        return True
+    if not vram.meta_ok:
+        # 估算不可靠：不拦截（旧版在这里用错误公式拦掉了能跑的组合）
+        return True
+    ngl = cfg.get("n-gpu-layers", "all")
+    if ngl == "all":
+        est = _estimate_vram_gb(vram, ctx_size, cfg.get("cache-type-k", "f16"))
+        return est <= vram.gpu_vram_gb * 0.9
+    # 部分卸载：权重按层数均摊，KV 只算进 GPU 的那些层
+    try:
+        ngl_n = int(str(ngl))
+    except ValueError:
+        est = _estimate_vram_gb(vram, ctx_size, cfg.get("cache-type-k", "f16"))
+        return est <= vram.gpu_vram_gb * 0.9
+    if ngl_n <= 0:
+        return True
+    # measured 模式没有真实层数，按 64 层近似均摊
+    layers_for_split = 64 if vram.kv_layers <= 1 else vram.kv_layers
+    per_layer_gb = vram.model_size_gb / layers_for_split
+    weights_gpu = per_layer_gb * ngl_n
+    est_all = _estimate_vram_gb(vram, ctx_size, cfg.get("cache-type-k", "f16"))
+    kv_all = est_all - vram.model_size_gb
+    kv_gpu = kv_all * min(ngl_n, layers_for_split) / layers_for_split
+    return (weights_gpu + kv_gpu) <= vram.gpu_vram_gb * 0.9
+
+
+def _calibrate_vram(vram: "_VRAMInfo", metrics: dict, baseline_cfg: dict,
+                    ctx_size: int) -> bool:
+    """基线跑通后，用真实显存占用反推"每 token KV 字节数"。
+
+    标准 GGUF 读得到结构元数据时不需要这一步；对自定义量化管线产出的
+    非标准 GGUF 文件，实测是唯一可靠的估算来源：
+        KV每token字节 ≈ (基线占用显存 − 模型权重 − 1.5GB 激活/碎片) / ctx
+    成功返回 True。
+    """
+    if vram.meta_ok or not vram.gpu_vram_gb:
+        return False
+    used_gb = vram.gpu_vram_gb * metrics.get("gpu_mem_pct", 0) / 100.0
+    kv_gb = used_gb - vram.model_size_gb - 1.5
+    if kv_gb <= 0.2:
+        return False
+    kv_bytes_per_token = kv_gb * (1024 ** 3) / max(ctx_size, 1)
+    if kv_bytes_per_token < 16:
+        return False
+    vram.kv_layers = 1
+    vram.kv_heads = 1
+    vram.kv_head_dim = 1
+    vram.bytes_per_kv_token = int(kv_bytes_per_token)
+    vram.measured_at_bytes = _CACHE_BYTES.get(
+        baseline_cfg.get("cache-type-k", "f16"), 2.0)
+    return True
+
+
+def _read_gpu_mem_free_gb(executor: Executor, target: Target) -> float:
+    """当前 GPU 空闲显存 GB；读不到返回 0.0"""
+    r = executor.run(
+        "nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits", timeout=8)
+    vals = [float(x) for x in r.stdout.split() if x.strip().isdigit()]
+    if vals:
+        return round(sum(vals) / 1024, 1)
+    if target.os == "linux":
+        r = executor.run(
+            "for d in /sys/class/drm/card*/device; do "
+            "t=$(cat $d/mem_info_vram_total 2>/dev/null); "
+            "u=$(cat $d/mem_info_vram_used 2>/dev/null); "
+            "[ -n \"$t\" ] && echo $((t - ${u:-0})); done", timeout=8)
+        best = 0.0
+        for line in r.stdout.split():
+            try:
+                best = max(best, int(line) / 1024 ** 3)
+            except ValueError:
+                continue
+        return round(best, 1)
+    return 0.0
+
+
+def _wait_vram_freed(executor: Executor, target: Target, job_id: str,
+                     used_before_gb: float, deadline_s: int = 90) -> None:
+    """停服后轮询直到显存真正释放，再放行下一组测试。
+
+    固定 sleep 2 秒不够：大模型显存归还可能要几十秒，抢跑会在"显存已满"
+    的 GPU 上启动下一组，表现成莫名其妙超时（Issue #1 run 2 的 4 次超时即此）。
+    """
+    if used_before_gb <= 0:
+        return
+    target_free = max(used_before_gb - 0.5, 0.5)
+    deadline = time.time() + deadline_s
+    warned = False
+    while time.time() < deadline:
+        free = _read_gpu_mem_free_gb(executor, target)
+        if free >= target_free:
+            return
+        if not warned:
+            _append_log(job_id, L("tune.log.vram_wait"))
+            warned = True
+        time.sleep(3)
+    if warned:
+        _append_log(job_id, L("tune.log.vram_still_busy"))
+
+
+def _ensure_stopped(executor: Executor, target: Target, engine: "LlamaCppAdapter",
+                    job_id: str) -> None:
+    """停掉 llama-server 并确认它真的退出了、显存释放了，再返回。
+
+    有进程管理器（如 llama-swap）时客户端请求可能随时把模型拉起来；
+    旧进程没退就启动下一组，两个服务抢端口/抢显存，测速全部失真。
+    """
+    used_before = _gpu_used_before(executor, target)
+    for attempt in range(3):
+        engine.stop()
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if not engine.is_running():
+                break
+            time.sleep(1)
+        if engine.is_running():
+            _append_log(job_id, L("tune.log.server_relaunched"))
+            continue
+        break
+    _wait_vram_freed(executor, target, job_id, used_before)
+
+
+def _gpu_used_before(executor: Executor, target: Target) -> float:
+    """停服前 GPU 已用显存 GB（释放判据）"""
+    r = executor.run(
+        "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits", timeout=8)
+    vals = [float(x) for x in r.stdout.split() if x.strip().isdigit()]
+    if vals:
+        return round(sum(vals) / 1024, 1)
+    if target.os == "linux":
+        r = executor.run(
+            "for d in /sys/class/drm/card*/device; do "
+            "u=$(cat $d/mem_info_vram_used 2>/dev/null); "
+            "[ -n \"$u\" ] && echo $u; done", timeout=8)
+        best = 0.0
+        for line in r.stdout.split():
+            try:
+                best = max(best, int(line) / 1024 ** 3)
+            except ValueError:
+                continue
+        return round(best, 1)
+    return 0.0
 
 
 # ==================== 测速 ====================
@@ -357,6 +661,10 @@ def _score(metrics: dict, goal: str) -> float:
     decode = metrics.get("decode", 0)
     prefill = metrics.get("prefill", 0)
     ttft = metrics.get("ttft_ms", 0) or 1.0
+    # decode<=0 说明这组根本没在生成（启动失败/立即 EOS/卡死），
+    # 无论 prefill 报多高都不许进排名（Issue #1：CPU 组 decode 0.0 却拿了最高分）
+    if decode <= 0:
+        return 0.0
     # 归一化基准（经验上限，仅用于把不同量纲压到可比区间）
     score = (w["decode"] * decode +
              w["prefill"] * (prefill / 100.0) +   # 预填充常上千，缩 100 倍
@@ -409,8 +717,7 @@ def _run_one(executor: Executor, target: Target, engine: LlamaCppAdapter,
              tag: str) -> Optional[dict]:
     """启动一组配置→测速→停止，返回带 metrics 的结果；启动失败返回 None"""
     label = _cfg_label(cfg)
-    engine.stop()
-    time.sleep(2)
+    _ensure_stopped(executor, target, engine, job_id)
     params = StartParams(model_path=model_path, extra_args=_args_list(cfg, target, ctx_size))
     ok, msg = engine.start(params)
     if not ok:
@@ -421,8 +728,7 @@ def _run_one(executor: Executor, target: Target, engine: LlamaCppAdapter,
         engine.stop()
         return None
     metrics = _bench_median(executor, target, ctx_size)
-    engine.stop()
-    time.sleep(2)
+    _ensure_stopped(executor, target, engine, job_id)
     _append_log(job_id, L("tune.log.run_result", tag=tag, label=label,
                           decode=metrics['decode'], prefill=metrics['prefill'],
                           gpu=metrics['gpu_util']))
@@ -430,24 +736,45 @@ def _run_one(executor: Executor, target: Target, engine: LlamaCppAdapter,
 
 
 def _coarse_search(executor, target, engine, model_path, ctx_size,
-                   model_size_gb, gpu_vram_gb, goal, job_id) -> Optional[dict]:
+                   vram: "_VRAMInfo", goal, job_id,
+                   baseline_cfg: Optional[dict] = None,
+                   baseline_gpu_ok: bool = False) -> Optional[dict]:
     """阶段一：搜离散主导因素 spec-type × cache-type。
     n-gpu-layers 默认 all（全进 GPU）；仅当 all 全部超显存时才降级用 0 兜底，
-    避免把纯 CPU 跑大模型这种必然慢的组合当常规候选浪费测速时间。"""
+    避免把纯 CPU 跑大模型这种必然慢的组合当常规候选浪费测速时间。
+    例外：基线刚在 GPU 上跑通过，估算公式再保守也不能推翻实测——仍测 GPU 组合，
+    绝不静默降级 CPU（Issue #1：基线 82 t/s 跑在 GPU 上，coarse 却全跳 CPU）。
+    """
+    spec_options = list(SPEC_OPTIONS)
+    # 基线用的复合投机模式（如 draft-mtp,ngram-mod,ngram-map-k4v）默认不在搜索
+    # 空间里；模型带 MTP 头时把它加进来，否则调优结果永远匹配不上真实配置。
+    base_spec = (baseline_cfg or {}).get("spec-type", "")
+    if ("," in base_spec and base_spec not in spec_options
+            and "mtp" in os.path.basename(model_path).lower()):
+        spec_options.append(base_spec)
+
     def _build(ngl):
         out = []
-        for spec in SPEC_OPTIONS:
+        for spec in spec_options:
             for cache in CACHE_OPTIONS:
                 cfg = _normalize_cfg(spec, cache, ngl,
                                      CONTINUOUS_GRID["batch-size"][1],
                                      CONTINUOUS_GRID["ubatch-size"][1], 3)
-                if _fits_vram(cfg, model_size_gb, ctx_size, gpu_vram_gb):
+                if _fits_vram(cfg, vram, ctx_size):
                     out.append(cfg)
                 else:
                     _append_log(job_id, L("tune.log.coarse_skip", cfg=_cfg_label(cfg)))
         return out
 
     candidates = _build("all")
+    if not candidates and baseline_gpu_ok:
+        _append_log(job_id, L("tune.log.vram_overridden"))
+        candidates = [
+            _normalize_cfg(spec, cache, "all",
+                           CONTINUOUS_GRID["batch-size"][1],
+                           CONTINUOUS_GRID["ubatch-size"][1], 3)
+            for spec, cache in ((s, c) for s in spec_options for c in CACHE_OPTIONS)
+        ]
     if not candidates:
         _append_log(job_id, L("tune.log.coarse_cpu"))
         candidates = _build("0")
@@ -470,7 +797,7 @@ def _coarse_search(executor, target, engine, model_path, ctx_size,
 
 
 def _fine_search(executor, target, engine, model_path, ctx_size,
-                 model_size_gb, gpu_vram_gb, goal, job_id,
+                 vram: "_VRAMInfo", goal, job_id,
                  base_cfg: dict) -> dict:
     """阶段二：在 coarse 最优附近，对连续参数坐标下降收敛"""
     current = dict(base_cfg)
@@ -503,7 +830,7 @@ def _fine_search(executor, target, engine, model_path, ctx_size,
                     continue
                 trial = dict(best["config"])
                 trial[param] = str(options[ni])
-                if not _fits_vram(trial, model_size_gb, ctx_size, gpu_vram_gb):
+                if not _fits_vram(trial, vram, ctx_size):
                     continue
                 r = _run_one(executor, target, engine, model_path, trial, ctx_size,
                              job_id, f"fine {param}={options[ni]}")
@@ -518,6 +845,97 @@ def _fine_search(executor, target, engine, model_path, ctx_size,
                     break
     _append_log(job_id, L("tune.log.fine_done", label=best['label'], score=best['score']))
     return best
+
+
+
+# ==================== 读取用户「当前真实配置」 ====================
+# 把正在运行的 llama-server 的命令行当作基线，而不是写死在前端的默认值。
+# 只保留会影响速度的参数；模型路径、端口、采样参数、ctx、fit、flash-attn
+# 由调优器自己控制或与速度无关，一律不带入。
+
+_LIVE_KEYS = {
+    "spec-type", "cache-type-k", "cache-type-v", "n-gpu-layers",
+    "batch-size", "ubatch-size", "threads", "threads-batch", "parallel",
+    "spec-draft-n-max", "spec-draft-n-min", "spec-draft-p-min",
+    "spec-draft-ngl", "n-gpu-layers-draft", "gpu-layers-draft", "model-draft",
+    "spec-ngram-mod-n-match", "spec-ngram-mod-n-min", "spec-ngram-mod-n-max",
+    "split-mode", "tensor-split", "main-gpu", "numa", "rope-scaling",
+    "keep", "override-kv",
+    # 无值开关
+    "mlock", "no-mmap", "no-warmup", "no-kv-offload", "kv-unified",
+}
+# 短参数名 / 别名 → 标准长名
+_LIVE_ALIASES = {
+    "ngl": "n-gpu-layers", "gpu-layers": "n-gpu-layers",
+    "ctk": "cache-type-k", "ctv": "cache-type-v",
+    "b": "batch-size", "ub": "ubatch-size",
+    "t": "threads", "tb": "threads-batch", "np": "parallel",
+    "sm": "split-mode", "ts": "tensor-split", "mg": "main-gpu",
+    "ngld": "n-gpu-layers-draft",
+}
+_NUM_RE = re.compile(r"^-?\d+(\.\d+)?$")
+
+
+def parse_llama_cmdline(tokens: List[str]) -> dict:
+    """把 llama-server 的参数列表解析成 {标准长名: 值}（无值开关值为 ""）。
+
+    返回 {"cfg": 影响速度的参数, "ctx": 命令行里的 ctx-size 或 None}。
+    """
+    cfg: dict = {}
+    ctx = None
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        i += 1
+        if not tok.startswith("-") or _NUM_RE.match(tok):
+            continue  # 不是参数名（比如路径里含空格被拆开的残片）
+        key = tok.lstrip("-")
+        val = None
+        if tok.startswith("--") and "=" in key:
+            key, val = key.split("=", 1)
+        key = _LIVE_ALIASES.get(key, key)
+        if val is None and i < n:
+            nxt = tokens[i]
+            if (not nxt.startswith("-")) or _NUM_RE.match(nxt):
+                val = nxt
+                i += 1
+        if key in ("ctx-size", "c") and val and val.isdigit():
+            ctx = int(val)
+            continue
+        if key in _LIVE_KEYS:
+            cfg[key] = val if val is not None else ""
+    return {"cfg": cfg, "ctx": ctx}
+
+
+def read_live_config(executor: Executor, target: Target, model: str = "") -> Optional[dict]:
+    """读取目标机上正在运行的 llama-server 的真实参数。
+
+    找不到（模型没加载 / Windows / 命令失败）返回 None，调用方回退到默认基线。
+    多个 llama-server 时优先取命令行里含所选模型文件名的那个。
+    """
+    if target.os == "windows":
+        return None
+    r = executor.run("ps -eo args=", timeout=10)
+    if not r.ok or not r.stdout:
+        return None
+    found = []
+    for line in r.stdout.splitlines():
+        line = line.strip()
+        try:
+            toks = shlex.split(line)
+        except ValueError:
+            continue
+        if toks and os.path.basename(toks[0]) == "llama-server":
+            found.append((line, toks))
+    if not found:
+        return None
+    pick = next((f for f in found if model and model in f[0]), found[0])
+    parsed = parse_llama_cmdline(pick[1][1:])
+    if not parsed["cfg"]:
+        return None
+    parsed["raw"] = pick[0]
+    return parsed
 
 
 # ==================== 主流程 ====================
@@ -573,15 +991,49 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
             gpu_vram_gb = _get_gpu_vram(executor, target)
             if model_size_gb <= 0:
                 model_size_gb = _get_model_size_gb(executor, target, model_path)
+            # 从 GGUF 文件头读模型真实结构（层数/注意力布局），让 KV 估算
+            # 按模型实际大小算，而不是按"27B 标准件"猜
+            meta = _read_gguf_meta(executor, target, model_path)
+            kv_layers = _kv_layers_from_meta(meta)
+            kv_heads = int(meta.get("kv_heads") or 0)
+            head_count = int(meta.get("head_count") or 0)
+            hidden = int(meta.get("hidden") or 0)
+            kv_head_dim = (hidden // head_count) if (hidden and head_count) else 0
+            vram = _VRAMInfo(
+                model_size_gb=model_size_gb,
+                gpu_vram_gb=gpu_vram_gb,
+                kv_layers=kv_layers,
+                kv_heads=kv_heads,
+                kv_head_dim=kv_head_dim,
+                bytes_per_kv_token=kv_heads * kv_head_dim,
+            )
             _append_log(job_id, L("tune.log.hw", vram=f"{gpu_vram_gb:.1f}", model=model,
                                   size=f"{model_size_gb:.1f}", ctx=ctx_size,
                                   goal=goal_label(goal)))
             all_results = []
+            baseline_gpu_ok = False
 
-            # 基线：用户原始参数先测一遍
+            # 基线：优先用目标机上正在运行的 llama-server 的真实参数；
+            # 读不到（模型没加载等）才回退到前端传来的默认基线。
+            # 必须在第一次 engine.stop() 之前读取，否则运行中的服务已被停掉。
+            base_cfg = baseline_cfg
             if baseline_cfg:
+                live = read_live_config(executor, target, model)
+                if live:
+                    base_cfg = live["cfg"]
+                    _append_log(job_id, "Captured your running llama-server config (used as baseline):")
+                    _append_log(job_id, "  raw: " + live["raw"])
+                    _append_log(job_id, "  baseline: " + _cfg_label(base_cfg))
+                    if live["ctx"] and live["ctx"] != ctx_size:
+                        _append_log(job_id, f"  note: your server runs ctx-size {live['ctx']} "
+                                            f"but this tuning is fixed at {ctx_size}")
+                else:
+                    _append_log(job_id, "No running llama-server found; using the built-in default "
+                                        "baseline. Load your model first (send one request) to use "
+                                        "your real config.")
+            if base_cfg:
                 _append_log(job_id, L("tune.log.baseline_test"))
-                b = _run_one(executor, target, engine, model_path, baseline_cfg,
+                b = _run_one(executor, target, engine, model_path, base_cfg,
                              ctx_size, job_id, "baseline")
                 if b:
                     b["score"] = _score(b["metrics"], goal)
@@ -589,11 +1041,21 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
                     with _LOCK:
                         _JOBS[job_id]["baseline"] = b
                     _append_log(job_id, L("tune.log.baseline_score", score=b['score']))
+                    # 基线真的在 GPU 上跑起来了（利用率可观）：后续任何"估算说
+                    # 放不下"都不许推翻这个实测结论——不允许静默降级成纯 CPU 测试
+                    baseline_gpu_ok = b["metrics"].get("gpu_util", 0) >= 5
+                    # GGUF 头读不到结构（自定义量化的非标准布局）时，用基线
+                    # 真实占用的显存校准估算器，让后续预检以实测为准
+                    if baseline_gpu_ok and not vram.meta_ok:
+                        if _calibrate_vram(vram, b["metrics"], base_cfg, ctx_size):
+                            _append_log(job_id, L("tune.log.vram_calibrated",
+                                                  kv=f"{vram.bytes_per_kv_token}"))
 
             # 阶段一 coarse
             coarse_best = _coarse_search(executor, target, engine, model_path,
-                                         ctx_size, model_size_gb, gpu_vram_gb,
-                                         goal, job_id)
+                                         ctx_size, vram, goal, job_id,
+                                         baseline_cfg=base_cfg,
+                                         baseline_gpu_ok=baseline_gpu_ok)
             if not coarse_best:
                 _fail(job_id, L("tune.fail.no_config"))
                 with _LOCK:
@@ -603,8 +1065,8 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
 
             # 阶段二 fine
             fine_best = _fine_search(executor, target, engine, model_path,
-                                     ctx_size, model_size_gb, gpu_vram_gb,
-                                     goal, job_id, coarse_best["config"])
+                                     ctx_size, vram, goal, job_id,
+                                     coarse_best["config"])
             all_results.append(fine_best)
 
             # 最终推荐 = fine 收敛结果；与基线对比
@@ -632,7 +1094,7 @@ def _get_model_size_gb(executor: Executor, target: Target, model_path: str) -> f
         cmd = (f'powershell -Command "if(Test-Path \'{model_path}\')'
                f'{(chr(123))}(Get-Item \'{model_path}\').Length{(chr(125))}else{{0}}"')
     else:
-        cmd = f'stat -c %s "{model_path}" 2>/dev/null || echo 0'
+        cmd = f'stat -Lc %s "{model_path}" 2>/dev/null || stat -c %s "{model_path}" 2>/dev/null || echo 0'
     r = executor.run(cmd, timeout=10)
     digits = "".join(c for c in r.stdout if c.isdigit())
     if digits:

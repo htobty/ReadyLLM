@@ -220,6 +220,11 @@ function AutoTune({ targetId }) {
           <div className="text-xs text-gray">
             {t('tune.metricsLine', { decode: best.metrics?.decode, prefill: best.metrics?.prefill, ttft: best.metrics?.ttft_ms, gpu: best.metrics?.gpu_util })}
           </div>
+          {baseline && (
+            <div className="mt-3 text-xs text-gray">
+              {t('tune.baselineLabel', { label: baseline.label, decode: baseline.metrics?.decode })}
+            </div>
+          )}
           {gain != null && baseline && (
             <div className={`mt-3 text-sm font-semibold ${Number(gain) >= 0 ? 'text-green' : 'text-red'}`}>
               {Number(gain) >= 0

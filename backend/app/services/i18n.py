@@ -517,6 +517,26 @@ MESSAGES = {
         "zh": "  全 GPU 组合均超显存，降级用 CPU 兜底(n-gpu-layers=0)",
         "en": "  All GPU combinations exceed VRAM; falling back to CPU (n-gpu-layers=0)",
     },
+    "tune.log.vram_overridden": {
+        "zh": "  估算认为放不下，但你的基线刚在 GPU 上跑通——仍按原计划测试 GPU 组合",
+        "en": "  Estimate says it won't fit, but your baseline just ran on the GPU — testing GPU combinations as planned",
+    },
+    "tune.log.vram_wait": {
+        "zh": "  等待显存释放…",
+        "en": "  Waiting for VRAM to be freed…",
+    },
+    "tune.log.vram_calibrated": {
+        "zh": "  已用基线实测显存校准估算器（KV ≈ {kv} 字节/token）",
+        "en": "  Estimator calibrated from the baseline's real VRAM usage (KV ≈ {kv} bytes/token)",
+    },
+    "tune.log.vram_still_busy": {
+        "zh": "  显存仍未完全释放（可能有进程管理器在重启模型），继续测试",
+        "en": "  VRAM not fully freed yet (a process manager may be relaunching the model); continuing",
+    },
+    "tune.log.server_relaunched": {
+        "zh": "  ⚠ llama-server 被进程管理器（如 llama-swap）重新拉起；建议先暂停该服务再测，否则测速会失真",
+        "en": "  ⚠ llama-server was relaunched by a process manager (e.g. llama-swap); pause it first or the measurements will be unreliable",
+    },
     "tune.log.coarse_best": {
         "zh": "  coarse 最优: {label} (分 {score})",
         "en": "  coarse best: {label} (score {score})",
