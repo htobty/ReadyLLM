@@ -976,8 +976,15 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
                             and base_cfg.get("n-gpu-layers") != "0":
                         baseline_gpu_ok = True
                         cache_k = base_cfg.get("cache-type-k", "f16")
-                        # 基线这一点已带回 ctx_size 的显存读数，直接当低档
-                        probes = [(ctx_size, b.get("gpu_mem_used_gb", 0.0))]
+                        # 两点必须走同一条采集路径，只让 ctx 不同。
+                        # 曾把基线那一点直接当低档复用，但基线跑过 3 遍 bench，
+                        # bench 结束后的显存未必回到纯驻留水平；拿它当低档等于把
+                        # 「bench 遗留差异」和「ctx 增长」混进同一个差值，斜率被系统性
+                        # 压低——真机实测偏低 2.88 倍（90876 vs 理论 262144），
+                        # 后果是 ctx≥32768 时把本该 OOM 的组合放行。
+                        used_lo = _probe_used_gb(
+                            executor, target, engine, model_path, base_cfg,
+                            ctx_size, job_id, "calib-lo", vram)
                         # 再探一档更大的 ctx，只读显存不跑测速。两点相减能消掉
                         # MTP draft、compute buffer 这类**不随 ctx 增长**的固定开销，
                         # 而单点反推会把这些开销除以 ctx 错当成 KV 斜率
@@ -985,6 +992,9 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
                         used_hi = _probe_used_gb(
                             executor, target, engine, model_path, base_cfg,
                             ctx_hi, job_id, "calib", vram)
+                        probes = []
+                        if used_lo > 0:
+                            probes.append((ctx_size, used_lo))
                         if used_hi > 0:
                             probes.append((ctx_hi, used_hi))
                         # 探针失败就放弃校准、回到 advisory 放行；绝不退回单点反推，
