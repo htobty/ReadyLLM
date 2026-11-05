@@ -505,6 +505,34 @@ MESSAGES = {
         "zh": "  基线分: {score}",
         "en": "  Baseline score: {score}",
     },
+    "tune.log.vram_calib": {
+        "zh": "  显存校准: 实测约 {kv} B/token(KV, f16 基准) @ ctx {n}",
+        "en": "  VRAM calibrated: measured ~{kv} B/token (KV, f16 basis) at ctx {n}",
+    },
+    "tune.log.vram_nocalib": {
+        "zh": "  ⚠ 基线显存读数不足以校准，预检改为放行（由真实启动判定）",
+        "en": "  ⚠ Baseline VRAM reading not enough to calibrate; precheck now advisory",
+    },
+    "tune.log.vram_wait": {
+        "zh": "  等待上一组释放显存…",
+        "en": "  Waiting for the previous run to release VRAM...",
+    },
+    "tune.log.vram_still_busy": {
+        "zh": "  ⚠ 显存仍未回落，继续下一组（可能被其他进程占用）",
+        "en": "  ⚠ VRAM still held, moving on (possibly taken by another process)",
+    },
+    "tune.log.vram_overridden": {
+        "zh": "  估算判定超显存，但基线已在 GPU 上跑通，按原计划测这些组合",
+        "en": "  Estimate said out of VRAM, but the baseline ran on the GPU; testing them anyway",
+    },
+    "tune.log.coarse_no_gpu": {
+        "zh": "  没有可用的 GPU 组合，且基线未能证明放得下 → 不降级到 CPU，直接结束",
+        "en": "  No usable GPU combination and the baseline did not prove otherwise - stopping instead of falling back to CPU",
+    },
+    "tune.log.baseline_fail": {
+        "zh": "  ⚠ 基线配置在当前模型/上下文中启动失败，仅记录不参与校准",
+        "en": "  ⚠ Baseline config failed to start for this model/context; skipped from calibration",
+    },
     "tune.log.coarse_start": {
         "zh": "【阶段1 coarse】{n} 组主导因素组合",
         "en": "[Stage 1 coarse] {n} dominant-factor combinations",
