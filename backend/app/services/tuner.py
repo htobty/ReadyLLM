@@ -173,6 +173,13 @@ def _args_list(cfg: dict, target: Target, ctx_size: int) -> List[str]:
         if k == "n-gpu-layers":
             # llama-server 同时认 --n-gpu-layers 与 --gpu-layers，用标准名
             args += ["--n-gpu-layers", str(v)]
+        elif k == "spec-type":
+            # 内部用 "off" 表示「不启用投机解码」，但 llama.cpp 的 --spec-type 只认
+            # none / draft-* / ngram-*，根本没有 "off"。
+            # 直接拼成 --spec-type off 会让 llama-server 在参数解析阶段就退出（实测报文：
+            # 'unknown speculative type: off'），_wait_ready 白等满超时，
+            # 最终被误报成「启动超时(可能显存不足)」——把参数错误归因成了显存不足。
+            args += ["--spec-type", "none" if str(v) == "off" else str(v)]
         else:
             args += [f"--{k}", str(v)]
     args += [

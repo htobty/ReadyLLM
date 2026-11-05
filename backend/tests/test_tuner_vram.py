@@ -313,3 +313,50 @@ class TestStopByPid(unittest.TestCase):
     def test_list_pids_ignores_non_numeric(self):
         a, _ = self._adapter(stdout="No Process Found\n")
         self.assertEqual(a._list_pids(), set())
+
+
+
+class TestArgsListSpecType(unittest.TestCase):
+    """--spec-type 非法值回归。
+
+    llama.cpp 的 --spec-type 合法值是 none / draft-simple / draft-eagle3 / draft-mtp /
+    draft-dflash / draft-dspark / ngram-simple / ngram-map-k / ngram-map-k4v / ngram-mod /
+    ngram-cache，**没有 off**。
+    tuner 内部用 "off" 表示关闭投机解码，若原样拼进命令行，llama-server 会在参数解析阶段
+    直接退出（unknown speculative type: off），_wait_ready 白等满超时，最后报出
+    「启动超时(可能显存不足)」——一个完全错误的归因，而且会静默丢掉 half the search space。
+    """
+
+    class _T:  # target 只需要 service_port
+        service_port = 8989
+
+    def _args(self, cfg):
+        from app.services.tuner import _args_list
+        return _args_list(cfg, self._T(), 8192)
+
+    def test_off_maps_to_none(self):
+        cfg = {"spec-type": "off", "cache-type-k": "q4_0"}
+        args = self._args(cfg)
+        self.assertIn("--spec-type", args)
+        idx = args.index("--spec-type")
+        self.assertEqual(args[idx + 1], "none")
+        # 注意：不能断言 "off" 整体不出现——--fit off 是固定项，合法且必须保留。
+        # 只校验紧跟在 --spec-type 后面的那个值。
+        self.assertNotEqual(args[idx + 1], "off")
+
+    def test_draft_mtp_passed_through(self):
+        cfg = {"spec-type": "draft-mtp"}
+        args = self._args(cfg)
+        idx = args.index("--spec-type")
+        self.assertEqual(args[idx + 1], "draft-mtp")
+
+    def test_compound_spec_type_passed_through(self):
+        # issue #6 问题 7 的目标形态：复合 spec-type 必须能完整透传
+        cfg = {"spec-type": "draft-mtp,ngram-mod"}
+        args = self._args(cfg)
+        idx = args.index("--spec-type")
+        self.assertEqual(args[idx + 1], "draft-mtp,ngram-mod")
+
+    def test_no_spec_type_key_omits_flag(self):
+        args = self._args({"cache-type-k": "q4_0"})
+        self.assertNotIn("--spec-type", args)

@@ -578,8 +578,8 @@ MESSAGES = {
         "en": "  [{tag}] {label} failed to start: {err}",
     },
     "tune.log.run_timeout": {
-        "zh": "  [{tag}] {label} 启动超时(可能显存不足)",
-        "en": "  [{tag}] {label} startup timed out (possibly out of VRAM)",
+        "zh": "  [{tag}] {label} 启动超时（显存不足或参数非法，详见服务端日志）",
+        "en": "  [{tag}] {label} startup timed out (out of VRAM or invalid args)",
     },
     "tune.log.run_result": {
         "zh": "  [{tag}] {label} → 解码{decode} t/s, 预填充{prefill} t/s, GPU {gpu}%",
