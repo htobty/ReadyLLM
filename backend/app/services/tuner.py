@@ -310,6 +310,9 @@ class _Vram:
     calibrated_ctx: int = 0           # 校准时的上下文长度
     idle_used_gb: float = 0.0         # 空载时 GPU 已用显存（区分"别人的占用"）
     cache_bytes_at_calib: float = 2.0
+    # 试启动预检开关。默认关 = 校准值只做参考、不用来拦截（两轮真机证明它测不准：
+    # 同配置两次差 17%，实测增量只有理论 1/3）。开启后改为真启动一次问结果。
+    precheck_enabled: bool = False
 
     @property
     def calibrated(self) -> bool:
@@ -429,13 +432,56 @@ def _probe_used_gb(executor: Executor, target: Target, engine: LlamaCppAdapter,
     return used_gb
 
 
-def _fits_vram(cfg: dict, vram: _Vram, ctx_size: int) -> bool:
-    """能否放进显存；n-gpu-layers=0 视为 CPU 兜底（慢但总能跑）。
+def _precheck_start(executor: Executor, target: Target, engine: LlamaCppAdapter,
+                    model_path: str, cfg: dict, ctx_size: int, job_id: str,
+                    vram: Optional[_Vram] = None) -> bool:
+    """试启动预检：不猜斜率，直接把这组参数真正拉起一次。
 
-    只有校准过才拦截。没校准 / 读不到显卡 / 权重大小未知时一律放行，
-    把判定权交回给真实启动——这正是旧版出问题的地方：它会用一个错公式
-    把可行配置全拦掉，然后静默降级到 CPU 产出无效结果。
+    为什么要这个：两点差分实测只能测到理论 KV 增量的 1/3（信号 0.5 GB，
+    读数噪声就有 0.09 GB），算出来的斜率两次差 17%，不可复现，不能拿来拦截。
+    与其猜，不如直接问一句「这组起得来吗」——启动成功就是最硬的证据。
+
+    代价：每组多一次真实加载（27B 约 30~60 秒），所以默认关闭，
+    只有显式开启 vram.precheck_enabled 时才走这条路。
     """
+    engine.stop()
+    if vram is not None:
+        _wait_vram_freed(executor, target, job_id, vram.idle_used_gb)
+    else:
+        time.sleep(2)
+    params = StartParams(model_path=model_path,
+                         extra_args=_args_list(cfg, target, ctx_size))
+    ok, msg = engine.start(params)
+    if not ok:
+        _append_log(job_id, L("tune.log.precheck_fail", err=msg))
+        return False
+    ready = _wait_ready(executor, target, engine=engine)
+    engine.stop()
+    if vram is not None:
+        _wait_vram_freed(executor, target, job_id, vram.idle_used_gb)
+    else:
+        time.sleep(2)
+    if not ready:
+        _append_log(job_id, L("tune.log.precheck_fail",
+                              err="服务未就绪或进程已退出"))
+    return ready
+
+
+def _fits_vram(cfg: dict, vram: _Vram, ctx_size: int) -> bool:
+    """估算这组参数放不放得下——**仅供参考，默认不再用于拦截**。
+
+    历史教训：这里曾经拿校准值做硬拦截，结果两层错误叠加，把能跑的配置全拦掉。
+    先是硬编码模型结构公式对混合注意力模型高估 3~4 倍；改用两点差分后，
+    实测斜率又只有真值的 1/3（信号 0.5 GB vs 理论 1.61 GB），偏到了另一头。
+
+    两轮真机数据（job f6c25914 / d50f99b8）证明这个量测不准：同配置两次算出
+    90876 和 106605，差 17%，而读数噪声就占了信号的 15%。
+
+    因此语义改为：默认一律放行，让真实启动去判定。只有显式开启
+    vram.precheck_enabled（走 _precheck_start 真启动）时才做筛选。
+    """
+    if not vram.precheck_enabled:
+        return True
     if cfg.get("n-gpu-layers") == "0":
         return True
     if not vram.calibrated or vram.gpu_vram_gb <= 0:
@@ -800,7 +846,16 @@ def _coarse_search(executor, target, engine, model_path, ctx_size,
                 cfg = _normalize_cfg(spec, cache, ngl,
                                      CONTINUOUS_GRID["batch-size"][1],
                                      CONTINUOUS_GRID["ubatch-size"][1], 3)
-                if _fits_vram(cfg, vram, ctx_size):
+                if vram.precheck_enabled:
+                    # 预检模式：不算斜率，直接真启动一次，起得来就参赛
+                    if _precheck_start(executor, target, engine, model_path,
+                                       cfg, ctx_size, job_id, vram):
+                        ok.append(cfg)
+                    else:
+                        skipped.append(cfg)
+                        _append_log(job_id, L("tune.log.precheck_skip",
+                                              cfg=_cfg_label(cfg)))
+                elif _fits_vram(cfg, vram, ctx_size):
                     ok.append(cfg)
                 else:
                     skipped.append(cfg)
@@ -888,7 +943,7 @@ def _fine_search(executor, target, engine, model_path, ctx_size,
 
 def start_tune(target_id: str, model: str, ctx_size: int = 8192,
                goal: str = "latency", baseline_cfg: Optional[dict] = None,
-               model_size_gb: float = 0.0) -> dict:
+               model_size_gb: float = 0.0, vram_precheck: bool = False) -> dict:
     """启动两阶段调优任务。
     baseline_cfg：用户原始参数（dict），作为基线先测一组对比。
     model_size_gb：模型大小，用于显存预检；缺省按 0 跳过预检。
@@ -940,7 +995,8 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
             # 空载已用显存：既是"等显存释放"的目标水位，也是校准时该扣掉的底噪
             idle_used_gb = _gpu_mem_used_gb(executor, target)
             vram = _Vram(model_size_gb=model_size_gb, gpu_vram_gb=gpu_vram_gb,
-                         idle_used_gb=idle_used_gb)
+                         idle_used_gb=idle_used_gb,
+                         precheck_enabled=vram_precheck)
             _append_log(job_id, L("tune.log.hw", vram=f"{gpu_vram_gb:.1f}", model=model,
                                   size=f"{model_size_gb:.1f}", ctx=ctx_size,
                                   goal=goal_label(goal)))

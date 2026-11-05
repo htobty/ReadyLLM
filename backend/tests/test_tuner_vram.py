@@ -63,16 +63,30 @@ class TestVramPrecheck(unittest.TestCase):
         self.assertAlmostEqual(q4 - 16.0, kv_f16 / 4, places=4)
 
     def test_blocks_when_calibrated_over_budget(self):
-        """校准过且确实放不下才拦；余量 6%"""
+        """校准过且确实放不下才拦（仅预检模式下）；余量 6%"""
         # 18 GB 权重 + 393216 B/token * 8192 ≈ 3 GB KV = 21 GB，24 GB 卡放得下
         v = _Vram(model_size_gb=18.0, gpu_vram_gb=24.0,
-                  kv_bytes_per_token=393216.0, calibrated_ctx=8192)
+                  kv_bytes_per_token=393216.0, calibrated_ctx=8192,
+                  precheck_enabled=True)
         self.assertTrue(_fits_vram(_cfg(), v, 8192))
         # 131072 上下文时 KV 约 48 GB，必超
         self.assertFalse(_fits_vram(_cfg(), v, 131072))
 
+    def test_calibrated_value_is_advisory_by_default(self):
+        """A 方案回归：校准值默认只作参考，不再用来拦截
+
+        两轮真机（job f6c25914 / d50f99b8）同配置算出 90876 与 106605 B/token，
+        相差 17%，而实测增量只有理论值的 1/3（信号 0.5 GB、噪声就有 0.09 GB）。
+        这种量级的数值没有资格决定拦不拦——拦错的代价比放行更高。
+        """
+        v = _Vram(model_size_gb=18.0, gpu_vram_gb=24.0,
+                  kv_bytes_per_token=393216.0, calibrated_ctx=8192)
+        self.assertFalse(v.precheck_enabled)
+        # 同一组「估算放不下」的配置，默认模式下必须放行，交给真实启动判定
+        self.assertTrue(_fits_vram(_cfg(), v, 131072))
+
     def test_fits_vram_boundary_uses_94_percent(self):
-        v = _Vram(model_size_gb=22.0, gpu_vram_gb=24.0)
+        v = _Vram(model_size_gb=22.0, gpu_vram_gb=24.0, precheck_enabled=True)
         v.kv_bytes_per_token = 0.0
         # 手工把关卡推到刚好边界：估算 = 22 + 0.5 = 22.5
         v.kv_bytes_per_token = 0.5 * GB / 8192

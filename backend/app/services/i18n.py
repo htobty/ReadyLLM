@@ -553,6 +553,18 @@ MESSAGES = {
         "zh": "  跳过(显存不足): {cfg}",
         "en": "  Skipped (insufficient VRAM): {cfg}",
     },
+    "tune.log.precheck_skip": {
+        "zh": "  跳过(试启动未就绪): {cfg}",
+        "en": "  Skipped (trial start failed): {cfg}",
+    },
+    "tune.log.precheck_fail": {
+        "zh": "  ⚠ 试启动预检失败: {err}",
+        "en": "  ⚠ Trial-start precheck failed: {err}",
+    },
+    "tune.log.precheck_on": {
+        "zh": "  已开启试启动预检：每组先真启动一次，起得来才参赛（会多花时间）",
+        "en": "  Trial-start precheck ON: each combo is really started once before being scored (costs extra time)",
+    },
     "tune.log.coarse_cpu": {
         "zh": "  全 GPU 组合均超显存，降级用 CPU 兜底(n-gpu-layers=0)",
         "en": "  All GPU combinations exceed VRAM; falling back to CPU (n-gpu-layers=0)",

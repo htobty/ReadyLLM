@@ -20,6 +20,9 @@ class TuneRequest(BaseModel):
     goal: str = "latency"                # latency | throughput | prefill
     baseline_cfg: Optional[Dict] = None  # 用户当前参数，作为基线先测对比
     model_size_gb: float = 0.0           # 模型权重 GB，0 则后端自动探测
+    # 试启动预检：默认关。关闭时校准值只作参考、不拦截（实测校准值不稳，
+    # 拦错的代价比放过更高）；开启后每组候选先真启动一次，起得来才参赛。
+    vram_precheck: bool = False
 
 
 @router.post("/start")
@@ -27,7 +30,7 @@ def start(req: TuneRequest):
     """启动两阶段调优任务"""
     return tuner.start_tune(
         req.target_id, req.model, req.ctx_size, req.goal,
-        req.baseline_cfg, req.model_size_gb,
+        req.baseline_cfg, req.model_size_gb, req.vram_precheck,
     )
 
 

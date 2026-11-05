@@ -60,6 +60,9 @@ function AutoTune({ targetId }) {
   const [goal, setGoal] = useState('latency')
   const [ctxSize, setCtxSize] = useState(8192)
   const [useBaseline, setUseBaseline] = useState(true)
+  // 试启动预检：默认关。校准值实测不稳（同配置两次差 17%），默认只当参考、
+  // 不拦任何组合；勾上后每组候选先真启动一次，起得来才参赛（会明显变慢）。
+  const [vramPrecheck, setVramPrecheck] = useState(false)
   const [state, setState] = useState('idle')
   const [logs, setLogs] = useState([])
   const [results, setResults] = useState([])
@@ -129,6 +132,7 @@ function AutoTune({ targetId }) {
         ctx_size: ctxSize,
         goal,
         baseline_cfg: useBaseline ? DEFAULT_BASELINE : null,
+        vram_precheck: vramPrecheck,
       }),
     })
     const d = await res.json()
@@ -195,9 +199,14 @@ function AutoTune({ targetId }) {
           ))}
         </div>
 
-        <label className="flex items-center gap-2 text-sm text-gray mb-6 cursor-pointer">
+        <label className="flex items-center gap-2 text-sm text-gray mb-2 cursor-pointer">
           <input type="checkbox" checked={useBaseline} onChange={e => setUseBaseline(e.target.checked)} className="accent-green" />
           {t('tune.baseline')}
+        </label>
+
+        <label className="flex items-center gap-2 text-sm text-gray mb-6 cursor-pointer">
+          <input type="checkbox" checked={vramPrecheck} onChange={e => setVramPrecheck(e.target.checked)} className="accent-green" />
+          {t('tune.vramPrecheck')}
         </label>
 
         <button onClick={start} disabled={state === 'running' || !selected}
