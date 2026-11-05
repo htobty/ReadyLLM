@@ -1,0 +1,18 @@
+# ReadyLLM
+
+> A web-based tool that deploys, monitors, and tunes local LLM inference (llama.cpp, vLLM, SGLang) on local or SSH-accessible machines, with auto and AI-driven parameter tuning and ComfyUI image/video generation.
+
+Python 3.9+ backend (default 127.0.0.1:8000) and Node.js 18+ frontend served at http://localhost:3000; in dev mode Vite proxies /api and /ws. Workflow: add a target machine, download models from the model store, deploy engines, watch live metrics on Monitor, and run tuning (auto or via your own LLM API). Architecture uses an executor abstraction (shell/SSH) and an engine registry with adapters; service settings live in backend/app/config.py, target configs in ~/.model-deploy-assistant/targets.json.
+
+## Docs
+
+- [ReadyLLM](https://raw.githubusercontent.com/htobty/ReadyLLM/main/README.md): Visual interface for deploying, monitoring, and tuning LLMs plus ComfyUI image/video generation; benchmarks, features, architecture, and roadmap.
+- [Quick Start](https://github.com/htobty/ReadyLLM/blob/main/README.md#quick-start): Three-step startup: run the backend on port 8000, open http://localhost:3000, add a machine, pick a model, hit Tune.
+- [Preview](https://github.com/htobty/ReadyLLM/blob/main/README.md#preview): Screenshots of real-time GPU/VRAM/throughput/latency monitoring, two-phase tuning, and target machine settings.
+- [Features](https://github.com/htobty/ReadyLLM/blob/main/README.md#features): Target management, hardware detection, model store, one-click deployment of llama.cpp/vLLM/SGLang, and real-time WebSocket monitoring.
+- [Architecture](https://github.com/htobty/ReadyLLM/blob/main/README.md#architecture): Executor abstraction for local and SSH targets, plus engine registry with adapter pattern for llama.cpp, vLLM, and ComfyUI.
+- [Getting Started](https://github.com/htobty/ReadyLLM/blob/main/README.md#getting-started): Requirements (Python 3.9+, Node.js 18+), starting backend and frontend, dev-mode Vite proxying, and optional production build.
+- [Workflow](https://github.com/htobty/ReadyLLM/blob/main/README.md#workflow): Five-step workflow from adding a target machine and downloading a model on Model Store to deploy, Monitor and Tuning.
+- [Configuration](https://github.com/htobty/ReadyLLM/blob/main/README.md#configuration): Service binding via HOST / PORT in config.py, target persistence at ~/.model-deploy-assistant/targets.json, AI tuning API settings, adding an EngineAdapter.
+- [Known Limitations](https://github.com/htobty/ReadyLLM/blob/main/README.md#known-limitations): VLLM on Windows requires WSL2, ComfyUI loopback preview proxied through backend, model sizes approximate with repository authoritative.
+- [Roadmap](https://github.com/htobty/ReadyLLM/blob/main/README.md#roadmap): Planned features: multi-engine concurrent scheduling, tuning history comparison and rollback, more quantization formats and desktop packaging.
