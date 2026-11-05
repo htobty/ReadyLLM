@@ -432,3 +432,49 @@ class TestWaitReadyDetectsProcessExit(unittest.TestCase):
     def test_no_engine_keeps_backward_compatible_behavior(self):
         ok, _ = self._run(None, timeout=6)
         self.assertFalse(ok)
+
+
+
+class TestSpecOptionsCoverage(unittest.TestCase):
+    """issue #6 问题 7：复合 spec-type 必须真的进入搜索空间
+
+    此前 SPEC_OPTIONS 只有 off / draft-mtp 两个单值，等于默认假设「投机只能单独用」，
+    而这个假设没有任何实测依据。llama-server --help 明确写着 --spec-type 接受
+    "comma-separated list of types of speculative decoding to use"。
+    """
+
+    def test_compound_value_in_search_space(self):
+        from app.services.tuner import SPEC_OPTIONS
+        self.assertIn("off", SPEC_OPTIONS)
+        self.assertIn("draft-mtp", SPEC_OPTIONS)
+        self.assertIn("draft-mtp,ngram-mod", SPEC_OPTIONS)
+
+    def test_coarse_candidate_count_is_nine(self):
+        """粗搜组数 = 主导因素取值数 × cache 取值数；保守方案应为 9"""
+        from app.services.tuner import SPEC_OPTIONS, CACHE_OPTIONS
+        self.assertEqual(len(SPEC_OPTIONS) * len(CACHE_OPTIONS), 9)
+
+    def test_every_spec_value_is_legal_for_llamacpp(self):
+        """每个取值（含复合值拆开后）都必须是 llama.cpp 认得的字面值
+
+        这是 e25abfd 那个 bug 的防线：`off` 是内部标记，必须映射成 none，
+        绝不能原样下发；复合值则逐个拆开校验。非法值会让进程在参数解析阶段退出，
+        再被误报成「启动超时(显存不足)」。
+        """
+        from app.services.tuner import SPEC_OPTIONS
+        legal = {"none", "draft-simple", "draft-eagle3", "draft-mtp", "draft-dflash",
+                 "draft-dspark", "ngram-simple", "ngram-map-k", "ngram-map-k4v",
+                 "ngram-mod", "ngram-cache"}
+        for val in SPEC_OPTIONS:
+            wire = "none" if val == "off" else val
+            for part in wire.split(","):
+                self.assertIn(part.strip(), legal,
+                              f"spec-type 取值 {val} 含非法子类型 {part}")
+
+    def test_compound_value_gets_draft_params(self):
+        """复合值含 draft-mtp，_normalize_cfg 必须补上 draft 调参项"""
+        from app.services.tuner import _normalize_cfg
+        cfg = _normalize_cfg("draft-mtp,ngram-mod", "f16", "all", 2048, 256, 3)
+        self.assertEqual(cfg["spec-type"], "draft-mtp,ngram-mod")
+        self.assertIn("spec-draft-n-max", cfg)
+        self.assertNotIn("spec-draft-n-max", _normalize_cfg("off", "f16", "all", 2048, 256, 3))

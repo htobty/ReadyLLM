@@ -212,6 +212,8 @@ cd frontend && npm run build      # output goes to frontend/dist
 - vLLM does not run natively on Windows; Windows targets must go through WSL2 (the tool shows a guidance prompt).
 - ComfyUI on the target listens on its own loopback address by default; when the control side cannot reach its port directly, finished-clip preview is proxied through the backend.
 - Model sizes are approximate, used only for display and VRAM filtering; the repository is authoritative.
+- **Tuning always runs the engine with `--fit off`**: `--fit` only adjusts arguments you left unset ("whether to adjust unset arguments to fit in device memory"), and the tuner sets ctx-size / batch-size / ubatch-size / n-gpu-layers / cache-type explicitly on every candidate — so `--fit on` would have nothing to adjust. Beyond that, every candidate has to run under the same memory policy to be comparable: if the engine silently shrank batch sizes to squeeze into VRAM, we would be measuring parameters that differ from the ones reported back to you.
+- **The tuned VRAM value is reference only**: the per-token KV figure printed in the log is measured, not predicted, and it is noisy at this signal level (the same config measured 90876 and 106605 B/token on two runs). It therefore never blocks a candidate by default. Enable *Trial-start precheck* on the Tuning page if you want each candidate really started once before it is scored.
 
 ## Roadmap
 

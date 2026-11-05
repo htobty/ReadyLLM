@@ -85,7 +85,13 @@ _BENCH_WARMUP = 2    # 预热次数，丢弃不计分：模型刚加载完的首
 # ==================== 参数分层 ====================
 
 # 离散高影响参数：coarse 阶段搜索
-SPEC_OPTIONS = ["off", "draft-mtp"]           # 投机解码方式
+# spec-type：llama.cpp 的 --spec-type 接受逗号分隔的复合值（--help 原文：
+# "comma-separated list of types of speculative decoding to use"），真机实测
+# `--spec-type draft-mtp,ngram-mod` 能通过参数解析。draft-mtp 需要模型自带 MTP 头，
+# ngram-* 不需要额外模型，两者可叠加：MTP 猜语义、ngram 猜局部重复，互不冲突。
+# issue #6 问题 7：此前只搜 off / draft-mtp 两个单值，复合组合从未被探索，
+# 等于假设「投机只能单独用」，这个假设没有任何实测依据。
+SPEC_OPTIONS = ["off", "draft-mtp", "draft-mtp,ngram-mod"]  # 投机解码方式
 CACHE_OPTIONS = ["f16", "q8_0", "q4_0"]       # KV cache 量化（越省显存越大 ctx）
 NGL_OPTIONS = ["all", "0"]                    # GPU 卸载层数（all 全进 GPU；0 全 CPU 兜底）
 
