@@ -360,3 +360,61 @@ class TestArgsListSpecType(unittest.TestCase):
     def test_no_spec_type_key_omits_flag(self):
         args = self._args({"cache-type-k": "q4_0"})
         self.assertNotIn("--spec-type", args)
+
+
+
+class TestWaitReadyDetectsProcessExit(unittest.TestCase):
+    """启动失败要能被快速识别，而不是干等满超时后误报成显存不足。
+
+    真机事故：--spec-type off 是非法值，llama-server 在参数解析阶段就退出，
+    端口永远不通，_wait_ready 白等 120 秒，最终报「启动超时(可能显存不足)」。
+    """
+
+    class _T:
+        service_port = 8989
+
+    class _Resp:
+        def __init__(self, out):
+            self.stdout = out
+
+    class _Exec:
+        """永远返回 000（服务不监听）"""
+        def run(self, cmd, timeout=None):
+            return TestWaitReadyDetectsProcessExit._Resp("000")
+
+    class _DeadEngine:
+        _pid = 4242
+
+        def _list_pids(self):
+            return set()          # 进程已经没了
+
+    class _AliveEngine:
+        _pid = 4242
+
+        def _list_pids(self):
+            return {4242}         # 进程还在，只是还没就绪
+
+    def _run(self, engine, timeout):
+        import time as _t
+        from app.services import tuner
+        orig = tuner.time.sleep
+        tuner.time.sleep = lambda s: None      # 去掉真实等待，避免单测跑满超时
+        try:
+            t0 = _t.time()
+            ok = tuner._wait_ready(self._Exec(), self._T(), timeout=timeout, engine=engine)
+            return ok, _t.time() - t0
+        finally:
+            tuner.time.sleep = orig
+
+    def test_dead_process_fails_fast(self):
+        ok, elapsed = self._run(self._DeadEngine(), timeout=120)
+        self.assertFalse(ok)
+        self.assertLess(elapsed, 30, "进程已退出时应立刻失败，不该等满 120 秒")
+
+    def test_alive_process_still_waits_until_timeout(self):
+        ok, _ = self._run(self._AliveEngine(), timeout=8)
+        self.assertFalse(ok)
+
+    def test_no_engine_keeps_backward_compatible_behavior(self):
+        ok, _ = self._run(None, timeout=6)
+        self.assertFalse(ok)

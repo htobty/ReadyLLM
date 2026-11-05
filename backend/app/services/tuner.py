@@ -413,8 +413,9 @@ def _probe_used_gb(executor: Executor, target: Target, engine: LlamaCppAdapter,
     if not ok:
         _append_log(job_id, L("tune.log.calib_probe_fail", tag=tag, err=msg))
         return 0.0
-    if not _wait_ready(executor, target):
-        _append_log(job_id, L("tune.log.calib_probe_fail", tag=tag, err="timeout"))
+    if not _wait_ready(executor, target, engine=engine):
+        _append_log(job_id, L("tune.log.calib_probe_fail", tag=tag,
+                              err="服务进程已退出或就绪超时"))
         engine.stop()
         return 0.0
     used_gb = _gpu_mem_used_gb(executor, target)
@@ -489,15 +490,36 @@ def _wait_vram_freed(executor: Executor, target: Target, job_id: str,
 
 # ==================== 测速 ====================
 
-def _wait_ready(executor: Executor, target: Target, timeout: int = 120) -> bool:
-    """轮询目标机 /health 直到服务就绪"""
+def _wait_ready(executor: Executor, target: Target, timeout: int = 120,
+                engine=None) -> bool:
+    """轮询目标机 /health 直到服务就绪。
+
+    传入 engine 时会额外核对「自己启动的那个进程是否还活着」。
+    原因：参数非法（例如把内部标记 off 原样拼成 --spec-type off）会让 llama-server
+    在参数解析阶段立刻退出，端口永远不会通；只盯 /health 就会干等满 timeout，
+    把「参数错了」误报成「启动超时(显存不足)」——真机 job f6c25914 就因此把
+    coarse 六组里的三组判成显存不足，而当时显存只用了 684 MiB。
+    """
     deadline = time.time() + timeout
     cmd = (f'curl -s -o /dev/null -w "%{{http_code}}" --max-time 3 '
            f'http://127.0.0.1:{target.service_port}/health')
+    checks = 0
     while time.time() < deadline:
         r = executor.run(cmd, timeout=8)
         if r.stdout.strip() == "200":
             return True
+        checks += 1
+        # 每 3 次探测核对一次进程存活：_list_pids 要走一次远程查询，不宜过密。
+        # 留出几次冗余是必要的——刚启动时进程可能还没被枚举到。
+        if engine is not None and checks % 3 == 0:
+            pid = getattr(engine, "_pid", None)
+            if pid:
+                try:
+                    alive = pid in engine._list_pids()
+                except Exception:
+                    alive = True  # 查不到不能当死亡，否则会把慢启动误判成失败
+                if not alive:
+                    return False
         time.sleep(2)
     return False
 
@@ -739,8 +761,9 @@ def _run_one(executor: Executor, target: Target, engine: LlamaCppAdapter,
     if not ok:
         _append_log(job_id, L("tune.log.run_fail", tag=tag, label=label, err=msg))
         return None
-    if not _wait_ready(executor, target):
-        _append_log(job_id, L("tune.log.run_timeout", tag=tag, label=label))
+    if not _wait_ready(executor, target, engine=engine):
+        _append_log(job_id, L("tune.log.run_fail", tag=tag, label=label,
+                              err="服务进程已退出（多为参数非法，详见服务端日志）"))
         engine.stop()
         return None
     # 服务已就绪、模型已驻留显存，此刻读到的已用显存才是校准可用的样本
