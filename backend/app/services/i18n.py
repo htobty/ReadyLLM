@@ -501,13 +501,25 @@ MESSAGES = {
         "zh": "【基线】测试你当前配置",
         "en": "[Baseline] Testing your current configuration",
     },
+    "tune.log.baseline_live": {
+        "zh": "  基线取自目标机正在运行的 llama-server: {cfg}",
+        "en": "  Baseline read from the running llama-server on target: {cfg}",
+    },
     "tune.log.baseline_score": {
         "zh": "  基线分: {score}",
         "en": "  Baseline score: {score}",
     },
     "tune.log.vram_calib": {
-        "zh": "  显存校准: 实测约 {kv} B/token(KV, f16 基准) @ ctx {n}",
-        "en": "  VRAM calibrated: measured ~{kv} B/token (KV, f16 basis) at ctx {n}",
+        "zh": "  显存校准: 实测约 {kv} B/token(KV, f16 基准) @ ctx {n}（{a}→{b} 两点差分，固定开销已相减消除）",
+        "en": "  VRAM calibrated: measured ~{kv} B/token (KV, f16 basis) at ctx {n} (two-point delta {a}->{b}, fixed overhead cancelled out)",
+    },
+    "tune.log.calib_probe": {
+        "zh": "  校准探针: ctx {ctx} 驻留后已用显存 {used} GB",
+        "en": "  Calibration probe: {used} GB used at ctx {ctx} after load",
+    },
+    "tune.log.calib_probe_fail": {
+        "zh": "  ⚠ 校准探针失败（{tag}）: {err}",
+        "en": "  ⚠ Calibration probe failed ({tag}): {err}",
     },
     "tune.log.vram_nocalib": {
         "zh": "  ⚠ 基线显存读数不足以校准，预检改为放行（由真实启动判定）",

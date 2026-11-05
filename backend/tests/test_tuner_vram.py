@@ -83,26 +83,42 @@ class TestVramPrecheck(unittest.TestCase):
 
 
 class TestCalibrate(unittest.TestCase):
-    def test_subtracts_idle_and_model(self):
-        v = _Vram(model_size_gb=16.0, gpu_vram_gb=24.0, idle_used_gb=2.0)
-        # 实测 22 GB = 2(底噪) + 16(权重) + 4(KV)  → 4 GB / 8192 token
-        self.assertTrue(_calibrate(v, 22.0, 8192, "f16"))
-        self.assertTrue(v.calibrated)
-        self.assertAlmostEqual(v.kv_bytes_per_token, 4 * GB / 8192, places=2)
-        self.assertEqual(v.calibrated_ctx, 8192)
+    def test_fixed_overhead_cancelled_by_two_points(self):
+        """本次 bug 回归：MTP draft / compute buffer 等固定开销不得混入 KV 斜率
 
-    def test_q8_cache_halves_bytes_per_token(self):
-        v = _Vram(model_size_gb=16.0, gpu_vram_gb=24.0, idle_used_gb=0.0)
-        self.assertTrue(_calibrate(v, 20.0, 8192, "q8_0"))   # KV 4 GB，但 cache 只有一半
-        self.assertAlmostEqual(v.kv_bytes_per_token, 8 * GB / 8192, places=2)
-        # 换算回同一 ctx 的估算，应回到实测的 4 GB
-        self.assertAlmostEqual(v.estimate_gb(8192, "q8_0") - 16.0, 4.0, places=3)
+        真机形态（27B Q4_K_M / 4090 / q4_0）：MTP 额外固定占 2.41 GB。
+        旧单点算法把它一并除以 ctx，报出 1431306 B/token（虚高 5.46 倍）；
+        两点差分把固定开销相减消掉，应回到 262144 B/token（f16 理论基准）。
+        """
+        kv_q4 = 65536                       # q4_0 每 token 字节（f16 的 1/4）
+        fixed = 2.41                        # MTP 固定开销，不随 ctx 变化
+        base = 0.42 + 16.64 + fixed         # idle + 权重 + 固定开销
+        u1 = base + kv_q4 * 8192 / GB
+        u2 = base + kv_q4 * 32768 / GB
+        v = _Vram(model_size_gb=16.64, gpu_vram_gb=24.0, idle_used_gb=0.42)
+        self.assertTrue(_calibrate(v, [(8192, u1), (32768, u2)], "q4_0"))
+        self.assertTrue(v.calibrated)
+        self.assertAlmostEqual(v.kv_bytes_per_token, 262144, delta=1)
+        self.assertEqual(v.calibrated_ctx, 32768)
+        # 关键后果：f16 KV@8192 应估成 18.64 GB，24 GB 卡上必须放行而不是被误拦
+        self.assertAlmostEqual(v.estimate_gb(8192, "f16"), 18.64, delta=0.02)
+        self.assertTrue(_fits_vram(_cfg(cache="f16"), v, 8192))
+
+    def test_q4_calibration_scales_to_f16_basis(self):
+        """q4_0 实测斜率换算成 f16 基准要乘 4"""
+        v = _Vram(model_size_gb=16.0, gpu_vram_gb=24.0)
+        u1 = 17.0
+        u2 = u1 + (65536 * 16384) / GB      # ctx 多 16384 对应的 q4_0 KV
+        self.assertTrue(_calibrate(v, [(8192, u1), (24576, u2)], "q4_0"))
+        self.assertAlmostEqual(v.kv_bytes_per_token, 262144, delta=1)
 
     def test_rejects_meaningless_reading(self):
         v = _Vram(model_size_gb=16.0, gpu_vram_gb=24.0, idle_used_gb=1.0)
-        self.assertFalse(_calibrate(v, 0.0, 8192, "f16"))     # 读不到显存
-        self.assertFalse(_calibrate(v, 15.0, 8192, "f16"))    # 比权重还小
-        self.assertFalse(_calibrate(v, 20.0, 0, "f16"))       # ctx 非法
+        self.assertFalse(_calibrate(v, [], "f16"))                              # 没有点
+        self.assertFalse(_calibrate(v, [(8192, 20.0)], "f16"))                  # 只有一点
+        self.assertFalse(_calibrate(v, [(8192, 0.0), (32768, 21.0)], "f16"))    # 读不到显存
+        self.assertFalse(_calibrate(v, [(8192, 20.0), (32768, 20.05)], "f16"))  # 差值低于阈值
+        self.assertFalse(_calibrate(v, [(8192, 20.0), (8192, 22.0)], "f16"))    # ctx 相同
         self.assertFalse(v.calibrated)
 
 
@@ -145,3 +161,155 @@ class TestI18nKeys(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class TestBenchFastFail(unittest.TestCase):
+    """服务崩掉时必须快速失败，不能跑满 5 遍 bench × 2 个请求 × --max-time 120。
+
+    真机 job 9fa06f07 实测：llama-server 进程还在、8989 已不监听，
+    tuner 在 running 状态静默卡了 13 分钟以上，前端完全看不出服务已经死了。
+    """
+
+    DEAD = {"decode": 0.0, "prefill": 0.0, "ttft_ms": 0.0, "gpu_util": 0.0,
+            "gpu_mem_pct": 0.0, "cpu_pct": 0.0, "mem_used_gb": 0.0,
+            "mem_total_gb": 0.0, "mem_pct": 0.0}
+
+    def test_bench_median_bails_out_when_service_dead(self):
+        from unittest.mock import patch
+        from app.services import tuner as T
+
+        calls = []
+        with patch.object(T, "_bench_once",
+                          side_effect=lambda *a, **k: (calls.append(1), dict(self.DEAD))[1]):
+            out = T._bench_median(None, None, 8192)
+
+        self.assertEqual(out["decode"], 0.0)
+        self.assertLessEqual(
+            len(calls), T._BENCH_DEAD_STREAK,
+            "服务已崩时不应继续跑剩余 bench 轮次",
+        )
+        self.assertLess(len(calls), T._BENCH_WARMUP + T._BENCH_REPEATS)
+
+    def test_bench_median_still_runs_full_rounds_when_healthy(self):
+        from unittest.mock import patch
+        from app.services import tuner as T
+
+        ok = dict(self.DEAD, decode=34.0, prefill=2583.0, ttft_ms=45.0)
+        calls = []
+        with patch.object(T, "_bench_once",
+                          side_effect=lambda *a, **k: (calls.append(1), dict(ok))[1]):
+            out = T._bench_median(None, None, 8192)
+
+        self.assertEqual(len(calls), T._BENCH_WARMUP + T._BENCH_REPEATS)
+        self.assertAlmostEqual(out["decode"], 34.0, places=2)
+
+    def test_health_ok_reflects_port_state(self):
+        from unittest.mock import MagicMock
+        from app.services import tuner as T
+
+        ex = MagicMock()
+        tgt = MagicMock()
+        tgt.service_port = 8989
+
+        ex.run.return_value.stdout = "000"
+        self.assertFalse(T._health_ok(ex, tgt), "端口无人监听时 health 必须为 False")
+
+        ex.run.return_value.stdout = "200"
+        self.assertTrue(T._health_ok(ex, tgt))
+
+
+
+class TestParseLiveCfg(unittest.TestCase):
+    """issue #6 问题 6：基线要能来自用户真实在跑的 llama-server 命令行。
+
+    解析必须只取「影响速度」的开关；模型路径、ctx、端口、host、metrics 由 tuner
+    自己接管，--fit / --flash-attn 属于显存与上下文策略（问题 8），基线里不覆盖。
+    """
+
+    def test_extracts_speed_keys_and_drops_plumbing(self):
+        from app.services.tuner import _parse_llama_cmdline
+
+        cmd = (
+            'H:\\llama\\llama-server.exe --model F:\\models\\Qwen3.8-27B-Q4_K_M.gguf '
+            '--ctx-size 8192 --n-gpu-layers all --cache-type-k q8_0 --cache-type-v q8_0 '
+            '--batch-size 2048 --ubatch-size 512 --spec-type draft-mtp,ngram-mod '
+            '--flash-attn on --fit on --metrics --host 0.0.0.0 --port 8989'
+        )
+        cfg = _parse_llama_cmdline(cmd)
+
+        # 取到的
+        self.assertEqual(cfg["n-gpu-layers"], "all")
+        self.assertEqual(cfg["cache-type-k"], "q8_0")
+        self.assertEqual(cfg["cache-type-v"], "q8_0")
+        self.assertEqual(cfg["batch-size"], "2048")
+        self.assertEqual(cfg["ubatch-size"], "512")
+        # 复合 spec-type 必须原样保留成单值，不能按逗号拆开（问题 7 的前提）
+        self.assertEqual(cfg["spec-type"], "draft-mtp,ngram-mod")
+
+        # 丢掉的：这些由 tuner 接管，或属于显存策略
+        for k in ("model", "ctx-size", "port", "host", "metrics", "fit", "flash-attn"):
+            self.assertNotIn(k, cfg, f"{k} 不该进入基线配置")
+
+    def test_short_aliases_map_to_long_keys(self):
+        from app.services.tuner import _parse_llama_cmdline
+
+        cfg = _parse_llama_cmdline("llama-server -ngl 99 -ctk q4_0 -ctv q4_0 -b 4096")
+        self.assertEqual(cfg["n-gpu-layers"], "99")
+        self.assertEqual(cfg["cache-type-k"], "q4_0")
+        self.assertEqual(cfg["cache-type-v"], "q4_0")
+        self.assertEqual(cfg["batch-size"], "4096")
+
+    def test_empty_or_garbage_returns_empty_dict(self):
+        """读不到命令行时必须返回空 dict，让调用方回落到内置基线而不是崩掉"""
+        from app.services.tuner import _parse_llama_cmdline
+
+        self.assertEqual(_parse_llama_cmdline(""), {})
+        self.assertEqual(_parse_llama_cmdline("llama-server --model x.gguf"), {})
+
+
+
+class TestStopByPid(unittest.TestCase):
+    """issue #6 问题 9：停服要按自己启动的 PID，不能按进程名。
+
+    按名 taskkill /im、pkill -f 会连带杀掉用户自己的 llama-server；也可能杀不干净，
+    留下占着端口和显存的僵尸进程，后续步骤再启动就"起了但不 ready"，静默挂死
+    （真机 job 9fa06f07 实测：8989 不监听、GPU 0%，job 却一直是 running）。
+    """
+
+    def _adapter(self, os_name="windows", stdout=""):
+        from unittest.mock import MagicMock
+        from app.services.llama_cpp import LlamaCppAdapter
+
+        ex = MagicMock()
+        ex.run.return_value.stdout = stdout
+        ex.run.return_value.ok = True
+        tgt = MagicMock()
+        tgt.os = os_name
+        return LlamaCppAdapter(ex, tgt), ex
+
+    def test_stop_kills_own_pid_not_image_name(self):
+        a, ex = self._adapter()
+        a._pid = 5696
+        ok, _ = a.stop()
+        self.assertTrue(ok)
+        cmd = ex.run.call_args[0][0]
+        self.assertIn("5696", cmd, "应按记录的 PID 停服")
+        self.assertNotIn("/im", cmd, "不能再按镜像名 taskkill")
+        self.assertIsNone(a._pid, "停服后必须清掉 PID，避免下次误杀复用的进程号")
+
+    def test_stop_falls_back_to_name_when_pid_unknown(self):
+        """没认出 PID（例如服务不是我们启的）时保留旧行为，不能直接不干活"""
+        a, ex = self._adapter()
+        a._pid = None
+        a.stop()
+        cmd = ex.run.call_args[0][0]
+        self.assertIn("/im", cmd)
+
+    def test_list_pids_parses_windows_multiline(self):
+        a, _ = self._adapter(stdout="1234\r\n5678\r\n")
+        self.assertEqual(a._list_pids(), {1234, 5678})
+
+    def test_list_pids_ignores_non_numeric(self):
+        a, _ = self._adapter(stdout="No Process Found\n")
+        self.assertEqual(a._list_pids(), set())

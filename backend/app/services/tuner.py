@@ -25,7 +25,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from statistics import median
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 from .executor import Executor
 from .engine_adapter import StartParams
@@ -76,6 +76,10 @@ _BENCH_LONG_PROMPT = (
 # 单次多花约 5 秒，远小于窗口过短把吞吐低估近一半的代价。
 _BENCH_MAX_TOKENS = 512
 _BENCH_REPEATS = 3   # 正式测速重复次数，取中位数
+# 连续多少次「一个 token 都没产出、预填充也没有」就判定服务已崩、立刻放弃本轮 bench。
+# 服务崩掉时若不快速失败，预热 2 次 + 正式 3 次、每次两个请求各等满 --max-time 120，
+# 最坏静默挂死 20 分钟而前端只看到 running（真机 job 9fa06f07 实测）。
+_BENCH_DEAD_STREAK = 2
 _BENCH_WARMUP = 2    # 预热次数，丢弃不计分：模型刚加载完的首个请求比稳态低约 18%
 
 # ==================== 参数分层 ====================
@@ -184,10 +188,94 @@ def _args_list(cfg: dict, target: Target, ctx_size: int) -> List[str]:
     return args
 
 
+# ============ 读取用户真实在跑的配置（issue #6 问题 6） ============
+
+# 只认「会改变推理速度」的开关。模型路径 / ctx / 端口 / host / metrics 由 tuner
+# 自己接管（必须固定，否则各组之间不可比）；--fit / --flash-attn 属于显存与上下文
+# 策略（issue #6 问题 8），基线里也刻意不覆盖：所有候选必须跑在同一策略下才公平。
+_LIVE_CFG_KEYS = {
+    "n-gpu-layers", "cache-type-k", "cache-type-v", "batch-size", "ubatch-size",
+    "spec-type", "spec-draft-n-max", "spec-draft-n-min", "spec-draft-p-min",
+    "threads", "threads-batch", "tensor-split", "split-mode", "main-gpu",
+    "no-kv-offload", "mlock", "no-mmap",
+}
+
+# llama-server 的短选项与别名，统一映射回 _args_list 里的长键名
+_LIVE_CFG_ALIAS = {
+    "ngl": "n-gpu-layers", "gpu-layers": "n-gpu-layers",
+    "n_gpu_layers": "n-gpu-layers",
+    "ctk": "cache-type-k", "ctv": "cache-type-v",
+    "b": "batch-size", "ub": "ubatch-size",
+    "t": "threads", "tb": "threads-batch",
+    "sm": "split-mode", "mg": "main-gpu",
+}
+
+
+def _parse_llama_cmdline(cmdline: str) -> Dict[str, str]:
+    """把 llama-server 命令行还原成 _args_list 能吃的 cfg dict。
+
+    只处理 `--key value` / `-key value`。裸开关（如 --no-mmap、--mlock，后面直接跟
+    另一个选项或结束）保留为 "on"，因为它们本身是显存/内存策略的一部分。
+    """
+    import shlex
+    try:
+        toks = shlex.split(cmdline or "")
+    except ValueError:
+        return {}
+    out: Dict[str, str] = {}
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if not (tok.startswith("-") and len(tok) > 1):
+            i += 1
+            continue
+        key = tok.lstrip("-")
+        key = _LIVE_CFG_ALIAS.get(key, key)
+        if key not in _LIVE_CFG_KEYS:
+            i += 1
+            continue
+        nxt = toks[i + 1] if i + 1 < len(toks) else ""
+        if nxt and not nxt.startswith("-"):
+            out[key] = nxt
+            i += 2
+        else:
+            out[key] = "on"
+            i += 1
+    return out
+
+
+def _read_live_cfg(executor: Executor, target: Target) -> Optional[dict]:
+    """读目标机上正在运行的 llama-server 命令行，解析成基线配置。
+
+    这是 issue #6 问题 6：基线应当来自用户真实在跑的进程，而不是前端硬编码的
+    DEFAULT_BASELINE。读不到（没在跑 / 命令失败 / 解析为空）返回 None，
+    由调用方回落到内置基线。
+    """
+    if target.os == "windows":
+        from .collectors import _ps
+        cmd = _ps("$p=Get-CimInstance Win32_Process | "
+                  "Where-Object {$_.Name -eq 'llama-server.exe'} | "
+                  "Select-Object -First 1 -ExpandProperty CommandLine")
+        timeout = 25
+    else:
+        cmd = "ps -eo args | grep -m1 '[l]lama-server'"
+        timeout = 10
+    r = executor.run(cmd, timeout=timeout)
+    if not r.ok:
+        return None
+    return _parse_llama_cmdline(r.stdout) or None
+
+
 # ==================== 显存可行性预检 ====================
 
 # KV cache 量化每元素字节数（同量化下 KV 占用与字节数成正比，用于跨量化换算）
 _CACHE_BYTES = {"f16": 2.0, "q8_0": 1.0, "q4_0": 0.5}
+
+# 校准探针的第二档上下文倍数：两档差值越大，MB 级读数噪声相对影响越小。
+# ctx 8192 时差值为 3 份 KV（27B q4_0 约 1.5 GB），足够压过噪声。
+CALIB_CTX_MULTIPLIER = 4
+# 两档显存读数差值低于此值时视为噪声主导，宁可放弃校准（预检放行）也不算斜率
+CALIB_MIN_KV_DELTA_GB = 0.15
 
 
 @dataclass
@@ -257,25 +345,80 @@ def _gpu_mem_used_gb(executor: Executor, target: Target) -> float:
     return 0.0
 
 
-def _calibrate(vram: _Vram, used_with_server_gb: float, ctx_size: int,
+def _calibrate(vram: _Vram, probes: List[Tuple[int, float]],
                cache_type: str) -> bool:
-    """用基线跑起来时的实测显存反推 KV 字节/token。
+    """用同一配置、两个不同 ctx 的实测显存求差，反推纯 KV 斜率。
 
-    减去的是"这台机器上不含本模型的占用"（idle_used），而不是 0：
-    桌面环境、别的服务、以及上一次没退干净的进程都会算进去，直接减 0 会把
-    别人的占用当成 KV cache，估出天文数字。
+    为什么不能用单点（旧做法）：llama-server 起来的显存里，除了 KV 还有一批
+    **不随 ctx 增长**的固定开销——MTP draft、compute buffer、CUDA context。
+    旧实现把 used − idle − model 全当作 KV，等于把这些固定开销除以 ctx 变成
+    "每 token 字节数"，斜率被放大数倍，ctx 越大错得越离谱。
+
+    真机实测（27B Q4_K_M / 4090 / ctx 8192 / q4_0）：
+        无 MTP 探针  17902 − 429 − 17043 =  430 MB  ≈ 理论 KV 512 MB（吻合）
+        带 MTP 基线  20316 − 429 − 17043 = 2844 MB  → 多算 2414 MB
+    单点反推因此报出 1431306 B/token，真值约 262144，虚高 5.46 倍，
+    4090 上本该跑得下的 f16 组合被误判显存不足而跳过。
+
+    两点相减时，两档都存在的固定开销自动消掉，只剩随 ctx 变化的部分：
+        (used_b − used_a) × 1024³ / (ctx_b − ctx_a) = 纯 KV 字节/token
+    因此这里**不再需要 idle_used 和 model_size**，它们在相减中同样抵消。
+    副产品：校准不再依赖两个容易读偏的值（模型软链、别的进程占卡）。
+
+    probes: [(ctx, 已用显存 GB), ...]，至少两个 ctx 不同的点。
     """
-    if used_with_server_gb <= 0 or ctx_size <= 0:
+    pairs = [(int(c), float(u)) for c, u in probes if c > 0 and u > 0]
+    if len(pairs) < 2:
         return False
-    kv_gb = used_with_server_gb - vram.idle_used_gb - vram.model_size_gb
-    # 扣完是负数或接近 0：说明权重没全进显存、或实测值没意义，不做校准
-    if kv_gb <= 0.05:
+    pairs.sort()
+    (ctx_a, used_a), (ctx_b, used_b) = pairs[0], pairs[-1]
+    d_ctx = ctx_b - ctx_a
+    d_used = used_b - used_a
+    if d_ctx <= 0:
         return False
+    # 差值太小：MB 级读数噪声会主导，算出的斜率不可信，宁可不校准（预检放行）
+    if d_used < CALIB_MIN_KV_DELTA_GB:
+        return False
+    kv_bytes_actual = d_used * (1024 ** 3) / d_ctx
     cache_b = _CACHE_BYTES.get(cache_type, 2.0)
-    vram.kv_bytes_per_token = (kv_gb * (1024 ** 3) / ctx_size) * (2.0 / cache_b)
-    vram.calibrated_ctx = ctx_size
+    vram.kv_bytes_per_token = kv_bytes_actual * (2.0 / cache_b)
+    vram.calibrated_ctx = ctx_b
     vram.cache_bytes_at_calib = 2.0
     return True
+
+
+def _probe_used_gb(executor: Executor, target: Target, engine: LlamaCppAdapter,
+                   model_path: str, cfg: dict, ctx_size: int, job_id: str,
+                   tag: str, vram: Optional[_Vram] = None) -> float:
+    """启动一次、只读模型驻留后的显存，然后停服；**不跑测速**。
+
+    校准只需要显存读数，不需要速度。复用 _run_one 会白跑 3 遍 benchmark，
+    而加载权重才是耗时主体——省掉 bench 让第二档探针代价小得多。
+    """
+    engine.stop()
+    if vram is not None:
+        _wait_vram_freed(executor, target, job_id, vram.idle_used_gb)
+    else:
+        time.sleep(2)
+    params = StartParams(model_path=model_path,
+                         extra_args=_args_list(cfg, target, ctx_size))
+    ok, msg = engine.start(params)
+    if not ok:
+        _append_log(job_id, L("tune.log.calib_probe_fail", tag=tag, err=msg))
+        return 0.0
+    if not _wait_ready(executor, target):
+        _append_log(job_id, L("tune.log.calib_probe_fail", tag=tag, err="timeout"))
+        engine.stop()
+        return 0.0
+    used_gb = _gpu_mem_used_gb(executor, target)
+    engine.stop()
+    if vram is not None:
+        _wait_vram_freed(executor, target, job_id, vram.idle_used_gb)
+    else:
+        time.sleep(2)
+    _append_log(job_id, L("tune.log.calib_probe", tag=tag, ctx=ctx_size,
+                          used=f"{used_gb:.2f}"))
+    return used_gb
 
 
 def _fits_vram(cfg: dict, vram: _Vram, ctx_size: int) -> bool:
@@ -352,6 +495,19 @@ def _wait_ready(executor: Executor, target: Target, timeout: int = 120) -> bool:
     return False
 
 
+def _health_ok(executor: Executor, target: Target, timeout: int = 3) -> bool:
+    """目标机 /health 是否可用。发重请求前用它快速判断服务死活。
+
+    没有这道探测时，服务一旦崩掉（进程还在、端口已不听），每个 completion
+    请求都要等满 --max-time 120：预热 2 次 + 正式 3 次，每次两个请求，
+    最坏静默挂死 20 分钟，前端只看到 status=running（真机 job 9fa06f07 实测）。
+    """
+    cmd = (f'curl -s -o /dev/null -w "%{{http_code}}" --max-time {timeout} '
+           f'http://127.0.0.1:{target.service_port}/health')
+    r = executor.run(cmd, timeout=timeout + 5)
+    return r.stdout.strip() == "200"
+
+
 def _curl_completion(executor: Executor, target: Target, payload: dict) -> Optional[dict]:
     """向目标机 llama-server 发一次 completion，返回解析后的 JSON 或 None。
 
@@ -359,6 +515,9 @@ def _curl_completion(executor: Executor, target: Target, payload: dict) -> Optio
     长 prompt 的 JSON 可达数十 KB，base64 内嵌进命令行会超 Windows cmd.exe
     8191 字符上限被截断（导致读到旧文件、测速失真），SFTP/本地写文件不受此限。
     """
+    # 服务已经崩掉就直接返回，不要让 --max-time 120 反复空等
+    if not _health_ok(executor, target):
+        return None
     body = json.dumps(payload)
     url = f"http://127.0.0.1:{target.service_port}/completion"
     if target.os == "windows":
@@ -461,9 +620,29 @@ def _bench_median(executor: Executor, target: Target, ctx_size: int) -> dict:
     预热必须够：模型刚加载完的首个请求比稳态低约 18%（实测 56.12 → 68.67 t/s，
     首帧计算图构建等一次性开销），只预热 1 次会把这份冷启动损耗算进正式结果。
     """
+    # 空结果：decode=0 时 _score 给 0 分，与「这组跑不动」的既有语义一致
+    empty = {"decode": 0.0, "prefill": 0.0, "ttft_ms": 0.0, "gpu_util": 0.0,
+             "gpu_mem_pct": 0.0, "cpu_pct": 0.0, "mem_used_gb": 0.0,
+             "mem_total_gb": 0.0, "mem_pct": 0.0}
+
+    def _dead(m: dict) -> bool:
+        """一个 token 都没生成、预填充也没有 → 不是慢，是服务根本没响应"""
+        return m["decode"] <= 0 and m["prefill"] <= 0
+
+    dead_streak = 0
     for _ in range(_BENCH_WARMUP):
-        _bench_once(executor, target, ctx_size)  # 预热，丢弃
-    runs = [_bench_once(executor, target, ctx_size) for _ in range(_BENCH_REPEATS)]
+        m = _bench_once(executor, target, ctx_size)  # 预热，丢弃
+        dead_streak = dead_streak + 1 if _dead(m) else 0
+        if dead_streak >= _BENCH_DEAD_STREAK:
+            return empty
+
+    runs = []
+    for _ in range(_BENCH_REPEATS):
+        m = _bench_once(executor, target, ctx_size)
+        dead_streak = dead_streak + 1 if _dead(m) else 0
+        if dead_streak >= _BENCH_DEAD_STREAK:
+            return empty
+        runs.append(m)
     return {
         "decode": round(median(r["decode"] for r in runs), 2),
         "prefill": round(median(r["prefill"] for r in runs), 2),
@@ -738,10 +917,23 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
             all_results = []
             baseline_gpu_ok = False
 
-            # 基线：用户原始参数先测一遍
-            if baseline_cfg:
+            # 基线：baseline_cfg 是否为 None 表示「用户要不要基线」；
+            # 要的话，优先用目标机上正在跑的 llama-server 命令行（issue #6 问题 6），
+            # 因为那才是用户当前配置的真实来源 → 读不到才回落到前端传的内置基线。
+            base_cfg = None
+            if baseline_cfg is not None:
+                live = _read_live_cfg(executor, target)
+                if live:
+                    base_cfg = live
+                    _append_log(job_id, L(
+                        "tune.log.baseline_live",
+                        cfg=" ".join(f"{k}={v}" for k, v in base_cfg.items())))
+                else:
+                    base_cfg = baseline_cfg
+
+            if base_cfg:
                 _append_log(job_id, L("tune.log.baseline_test"))
-                b = _run_one(executor, target, engine, model_path, baseline_cfg,
+                b = _run_one(executor, target, engine, model_path, base_cfg,
                              ctx_size, job_id, "baseline", vram)
                 if b:
                     b["score"] = _score(b["metrics"], goal)
@@ -749,17 +941,29 @@ def start_tune(target_id: str, model: str, ctx_size: int = 8192,
                     with _LOCK:
                         _JOBS[job_id]["baseline"] = b
                     _append_log(job_id, L("tune.log.baseline_score", score=b['score']))
-                    # 基线在 GPU 上真跑通了 → 用它反推 KV 字节/token，预检才有依据
+                    # 基线在 GPU 上真跑通了 → 用两点差分反推 KV 字节/token
                     if b["metrics"].get("decode", 0) > 0 \
-                            and baseline_cfg.get("n-gpu-layers") != "0":
+                            and base_cfg.get("n-gpu-layers") != "0":
                         baseline_gpu_ok = True
-                        cache_k = baseline_cfg.get("cache-type-k", "f16")
-                        if _calibrate(vram, b.get("gpu_mem_used_gb", 0.0),
-                                      ctx_size, cache_k):
+                        cache_k = base_cfg.get("cache-type-k", "f16")
+                        # 基线这一点已带回 ctx_size 的显存读数，直接当低档
+                        probes = [(ctx_size, b.get("gpu_mem_used_gb", 0.0))]
+                        # 再探一档更大的 ctx，只读显存不跑测速。两点相减能消掉
+                        # MTP draft、compute buffer 这类**不随 ctx 增长**的固定开销，
+                        # 而单点反推会把这些开销除以 ctx 错当成 KV 斜率
+                        ctx_hi = ctx_size * CALIB_CTX_MULTIPLIER
+                        used_hi = _probe_used_gb(
+                            executor, target, engine, model_path, base_cfg,
+                            ctx_hi, job_id, "calib", vram)
+                        if used_hi > 0:
+                            probes.append((ctx_hi, used_hi))
+                        # 探针失败就放弃校准、回到 advisory 放行；绝不退回单点反推，
+                        # 单点正是把固定开销错算成 KV 的根源（错误拦截比放行更糟）
+                        if _calibrate(vram, probes, cache_k):
                             _append_log(job_id, L(
                                 "tune.log.vram_calib",
                                 kv=_fmt_num(vram.kv_bytes_per_token),
-                                n=vram.calibrated_ctx))
+                                n=vram.calibrated_ctx, a=ctx_size, b=ctx_hi))
                         else:
                             _append_log(job_id, L("tune.log.vram_nocalib"))
                 else:
