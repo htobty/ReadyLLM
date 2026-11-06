@@ -455,6 +455,7 @@ def _precheck_start(executor: Executor, target: Target, engine: LlamaCppAdapter,
         _wait_vram_freed(executor, target, job_id, vram.idle_used_gb)
     else:
         time.sleep(2)
+    t0 = time.monotonic()
     params = StartParams(model_path=model_path,
                          extra_args=_args_list(cfg, target, ctx_size))
     ok, msg = engine.start(params)
@@ -467,9 +468,14 @@ def _precheck_start(executor: Executor, target: Target, engine: LlamaCppAdapter,
         _wait_vram_freed(executor, target, job_id, vram.idle_used_gb)
     else:
         time.sleep(2)
+    cost = time.monotonic() - t0
     if not ready:
         _append_log(job_id, L("tune.log.precheck_fail",
                               err="服务未就绪或进程已退出"))
+    else:
+        # 每条都记：预检成不成立必须能从日志数出来，否则开关开没开无从判断
+        _append_log(job_id, L("tune.log.precheck_pass",
+                              cfg=_cfg_label(cfg), s=f"{cost:.1f}"))
     return ready
 
 
@@ -845,6 +851,11 @@ def _coarse_search(executor, target, engine, model_path, ctx_size,
     现在只在"估算放不下、但基线刚在 GPU 上跑通"时按原计划测 GPU（估算不可信），
     其余情况失败就如实报错，不要用 CPU 结果凑数。
     """
+    if vram.precheck_enabled:
+        # 开关是否真的生效必须留在日志里：此前这条日志的 i18n 键定义了却没人调用，
+        # 导致"预检执行了"和"预检根本没执行"产生一模一样的空日志，无从判断。
+        _append_log(job_id, L("tune.log.precheck_on"))
+
     def _build(ngl):
         ok, skipped = [], []
         for spec in SPEC_OPTIONS:
